@@ -20,9 +20,10 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-from app_paths import data_path
+from app_paths import data_path, secret_path
 
-CONFIG_PATH = data_path("llm_config.json")   # 冻结后写在 exe 同级目录
+CONFIG_PATH = data_path("llm_config.json")   # 非敏感设置：便携，放 exe 同级
+SECRET_PATH = secret_path()                   # 用户手填的密钥：只放本用户配置目录
 CREDENTIALS = os.path.expanduser(r"~\.dsh\.credentials.yaml")
 
 DEFAULTS = {
@@ -73,6 +74,15 @@ def load_config() -> dict:
             cfg.update(json.load(open(CONFIG_PATH, encoding="utf-8")))
         except Exception:
             pass
+    # 用户手填的密钥存在用户配置目录（不放在程序目录，避免随文件夹分发而泄漏）
+    if os.path.exists(SECRET_PATH):
+        try:
+            secret = json.load(open(SECRET_PATH, encoding="utf-8"))
+            if secret.get("api_key"):
+                cfg["api_key"] = secret["api_key"]
+                cfg["key_source"] = "user"
+        except Exception:
+            pass
     cfg["base_url"] = os.environ.get("LLM_BASE_URL", cfg["base_url"]).rstrip("/")
     cfg["model"] = os.environ.get("LLM_MODEL", cfg["model"])
     cfg["temperature"] = float(os.environ.get("LLM_TEMPERATURE", cfg["temperature"]))
@@ -91,13 +101,26 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    """只持久化非敏感项；密钥仅在用户主动填写时写入。"""
+    """非敏感设置写便携配置；用户手填的密钥单独写用户配置目录（权限收紧到本人可读）。"""
     keep = {k: cfg[k] for k in ("base_url", "model", "temperature", "max_tokens", "timeout",
                                 "api_key_env", "credential_name")
             if k in cfg}
-    if cfg.get("api_key") and cfg.get("key_source") == "user":
-        keep["api_key"] = cfg["api_key"]
+    # 便携配置里永远不带密钥
+    keep.pop("api_key", None)
     json.dump(keep, open(CONFIG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+    if cfg.get("api_key") and cfg.get("key_source") in ("user", "saved"):
+        json.dump({"api_key": cfg["api_key"]}, open(SECRET_PATH, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+        try:
+            os.chmod(SECRET_PATH, 0o600)          # 仅本人可读写（Windows 上忽略即可）
+        except Exception:                                          # noqa: BLE001
+            pass
+    elif cfg.get("api_key") == "" and os.path.exists(SECRET_PATH):
+        try:
+            os.remove(SECRET_PATH)                # 用户清空了密钥 → 一并删掉
+        except Exception:                                          # noqa: BLE001
+            pass
 
 
 def mask(key: str) -> str:
