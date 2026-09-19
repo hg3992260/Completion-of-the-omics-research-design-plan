@@ -82,6 +82,29 @@ def data_path(*parts: str) -> str:
     return p
 
 
+def config_dir() -> str:
+    """用户级配置目录（放密钥等敏感信息，不随程序目录分发）。"""
+    if sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    elif sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData",
+                                                         "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"),
+                                                                 ".config")
+    d = os.path.join(base, APP_NAME)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:                                              # noqa: BLE001
+        d = app_home()
+    return d
+
+
+def secret_path() -> str:
+    """密钥文件路径（仅本用户可读）。"""
+    return os.path.join(config_dir(), "secret.json")
+
+
 def export_dir() -> str:
     """导出文件的落盘目录：优先用户可见的位置（文档/桌面/家目录）。
 
