@@ -1,0 +1,10 @@
+{
+  "_说明": "冻结版注册片段：command 指向单个 exe，args 传 mcp（stdio 传输）。图形模式直接双击即可，不会有黑框。",
+  "mcpServers": {
+    "radiomics-workbench": {
+      "command": "I:\\文件\\CTCC\\HL\\omics_pipeline\\dist\\PCLRadiomics\\PCLRadiomics.exe",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}

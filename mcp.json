@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "radiomics-workbench": {
+      "command": "D:\\python\\envs\\mar\\python.exe",
+      "args": [
+        "I:\\文件\\CTCC\\HL\\omics_pipeline\\mcp_server.py"
+      ],
+      "env": {}
+    }
+  }
+}

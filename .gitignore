@@ -1,0 +1,37 @@
+# 运行期数据（可能含个人研究内容与本地配置，不要上传）
+projects/
+progress_state.json
+llm_config.json
+ui_prefs.json
+error.log
+研究设计_*
+
+# 打包产物与缓存
+build/
+dist/
+dist_onefile/
+build_onefile/
+*.manifest
+
+# 自检/调试输出（脚本本身保留，输出不入库）
+_shots/
+_pmtest/
+_*.log
+_*.txt
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Windows 本地快捷方式（指向本机绝对路径，对别人无意义）
+*.lnk

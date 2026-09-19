@@ -1,0 +1,92 @@
+{
+  "CButton": {
+    "corner_radius": 8,
+    "border_width": 0,
+    "background_color": ["rgb(14, 127, 193)", "rgb(255, 122, 26)"],
+    "text_color": ["rgb(255, 255, 255)", "rgb(26, 15, 5)"],
+    "border_color": ["rgb(205, 220, 238)", "rgb(44, 46, 54)"],
+    "hover_color": ["rgb(10, 107, 166)", "rgb(255, 148, 69)"],
+    "pressed_color": ["rgb(9, 90, 140)", "rgb(226, 100, 15)"],
+    "disabled_background_color": ["rgba(14, 127, 193, 0.45)", "rgba(255, 122, 26, 0.35)"],
+    "disabled_text_color": ["rgba(255, 255, 255, 0.6)", "rgba(26, 15, 5, 0.5)"]
+  },
+
+  "CComboBox": {
+    "corner_radius": 8,
+    "border_width": 1,
+    "menu_border_width": 1,
+    "item_border_width": 0,
+    "background_color": ["rgb(255, 255, 255)", "rgb(25, 26, 31)"],
+    "text_color": ["rgb(22, 35, 58)", "rgb(236, 237, 240)"],
+    "border_color": ["rgb(214, 228, 242)", "rgb(44, 46, 54)"],
+    "hover_color": ["rgb(226, 238, 252)", "rgb(36, 37, 44)"],
+    "menu_background_color": ["rgb(255, 255, 255)", "rgb(25, 26, 31)"],
+    "menu_border_color": ["rgb(214, 228, 242)", "rgb(58, 60, 68)"],
+    "item_background_color": ["rgb(255, 255, 255)", "rgb(25, 26, 31)"],
+    "item_text_color": ["rgb(22, 35, 58)", "rgb(236, 237, 240)"],
+    "item_border_color": ["rgb(214, 228, 242)", "rgb(44, 46, 54)"],
+    "item_hover_color": ["rgb(226, 238, 252)", "rgb(42, 33, 24)"],
+    "disabled_background_color": ["rgba(255, 255, 255, 0.5)", "rgba(25, 26, 31, 0.5)"],
+    "disabled_text_color": ["rgba(22, 35, 58, 0.45)", "rgba(236, 237, 240, 0.45)"]
+  },
+
+  "CFrame": {
+    "corner_radius": 12,
+    "border_width": 1,
+    "border_color": ["rgb(214, 228, 242)", "rgb(44, 46, 54)"],
+    "background_color": ["rgb(255, 255, 255)", "rgb(25, 26, 31)"]
+  },
+
+  "CLabel": {
+    "corner_radius": 6,
+    "border_width": 0,
+    "text_color": ["rgb(22, 35, 58)", "rgb(236, 237, 240)"],
+    "disabled_text_color": ["rgba(22, 35, 58, 0.45)", "rgba(236, 237, 240, 0.45)"]
+  },
+
+  "CLineEdit": {
+    "corner_radius": 8,
+    "border_width": 1,
+    "background_color": ["rgb(255, 255, 255)", "rgb(19, 20, 24)"],
+    "text_color": ["rgb(22, 35, 58)", "rgb(236, 237, 240)"],
+    "placeholder_text_color": ["rgb(128, 148, 170)", "rgb(140, 142, 150)"],
+    "border_color": ["rgb(214, 228, 242)", "rgb(44, 46, 54)"],
+    "disabled_background_color": ["rgba(255, 255, 255, 0.5)", "rgba(19, 20, 24, 0.5)"],
+    "disabled_text_color": ["rgba(22, 35, 58, 0.45)", "rgba(236, 237, 240, 0.45)"]
+  },
+
+  "CScrollBar": {
+    "corner_radius": 6,
+    "width": 10,
+    "background_color": ["rgb(220, 231, 243)", "rgb(35, 36, 41)"],
+    "hover_color": ["rgb(190, 210, 232)", "rgb(56, 57, 64)"],
+    "pressed_color": ["rgb(160, 186, 214)", "rgb(80, 82, 90)"]
+  },
+
+  "CSlider": {
+    "corner_radius": 3,
+    "border_width": 0,
+    "button_corner_radius": 7,
+    "button_border_width": 0,
+    "background_color": ["rgb(220, 231, 243)", "rgb(35, 36, 41)"],
+    "border_color": ["rgb(214, 228, 242)", "rgb(44, 46, 54)"],
+    "progress_color": ["rgb(14, 127, 193)", "rgb(255, 122, 26)"],
+    "button_background_color": ["rgb(14, 127, 193)", "rgb(255, 122, 26)"],
+    "button_border_color": ["rgb(14, 127, 193)", "rgb(255, 122, 26)"],
+    "button_hover_color": ["rgb(10, 107, 166)", "rgb(255, 148, 69)"],
+    "button_pressed_color": ["rgb(9, 90, 140)", "rgb(226, 100, 15)"],
+    "disabled_background_color": ["rgba(220, 231, 243, 0.5)", "rgba(35, 36, 41, 0.5)"],
+    "disabled_button_background_color": ["rgba(14, 127, 193, 0.45)", "rgba(255, 122, 26, 0.35)"]
+  },
+
+  "CTextEdit": {
+    "corner_radius": 10,
+    "border_width": 1,
+    "background_color": ["rgb(255, 255, 255)", "rgb(19, 20, 24)"],
+    "text_color": ["rgb(22, 35, 58)", "rgb(236, 237, 240)"],
+    "placeholder_text_color": ["rgb(128, 148, 170)", "rgb(140, 142, 150)"],
+    "border_color": ["rgb(214, 228, 242)", "rgb(44, 46, 54)"],
+    "disabled_background_color": ["rgba(255, 255, 255, 0.5)", "rgba(19, 20, 24, 0.5)"],
+    "disabled_text_color": ["rgba(22, 35, 58, 0.45)", "rgba(236, 237, 240, 0.45)"]
+  }
+}

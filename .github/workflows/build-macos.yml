@@ -1,0 +1,118 @@
+name: build-macos
+
+# 在 macOS 上打出 .app 与 .dmg（PyInstaller 不能跨平台编译，必须用 macOS 机器）。
+#
+# 产物：
+#   PCLRadiomics-<版本>-macos-<架构>.dmg   ← 拖进 Applications 即可用
+#   pclradiomics-macos-cli.zip             ← 纯命令行版（MCP / API，注册更省事）
+#
+# 默认跑 macos-latest（Apple Silicon / arm64）。
+# 需要 Intel 版就再触发一次并选 runner=macos-13（GitHub 仍提供 x86_64 机器）。
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 选择构建机（arm64 用 macos-latest，Intel 用 macos-13）
+        type: choice
+        options: [macos-latest, macos-13]
+        default: macos-latest
+      universal2:
+        description: 尝试构建通用二进制（依赖需有 universal2 轮子，失败不影响其它产物）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  APP_DIR: "."
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'macos-latest' }}
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ${{ env.APP_DIR }}/requirements.txt
+
+      - name: 安装依赖
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 导入自检（不依赖网络与密钥）
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -c "import cli, design_studio, ui_kit, mcp_server, api_server, app_paths, win_stdio; print('imports OK')"
+          python -c "import sys, ui_kit; print('platform', sys.platform, '| UI_FONT', ui_kit.UI_FONT)"
+          python cli.py paths
+          python cli.py stages | head -3
+          python mcp_server.py --list-tools
+
+      - name: 打包 .app 与命令行版
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          PCL_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '1.0.0' }}
+          PCL_ARCH: ${{ (github.event_name == 'workflow_dispatch' && inputs.universal2) && 'universal2' || '' }}
+        run: python -m PyInstaller --noconfirm --clean pclradiomics_macos.spec
+
+      - name: 自检产物（.app 内的二进制就是命令行入口）
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -x
+          APP_BIN="dist/PCLRadiomics.app/Contents/MacOS/PCLRadiomics"
+          test -x "$APP_BIN" || { echo "缺少 .app 可执行文件"; exit 1; }
+          "$APP_BIN" paths
+          "$APP_BIN" stages | head -3
+          # check 会联网列模型：CI 里通常没有密钥，失败不作为构建失败
+          "$APP_BIN" check | tail -6 || true
+          test -x dist/pclradiomics-cli/pclradiomics || { echo "缺少命令行版"; exit 1; }
+          dist/pclradiomics-cli/pclradiomics stages | head -2
+
+      - name: 生成 dmg
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          PCL_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '1.0.0' }}
+        run: |
+          chmod +x make_dmg.sh
+          ./make_dmg.sh
+
+      - name: 打包命令行版
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          cd dist && zip -r ../pclradiomics-macos-cli.zip pclradiomics-cli
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCLRadiomics-macos
+          path: |
+            ${{ env.APP_DIR }}/PCLRadiomics-*-macos-*.dmg
+            ${{ env.APP_DIR }}/PCLRadiomics-*-macos-*.dmg.sha256
+            ${{ env.APP_DIR }}/pclradiomics-macos-cli.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 打 tag 时创建 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.APP_DIR }}/PCLRadiomics-*-macos-*.dmg
+            ${{ env.APP_DIR }}/PCLRadiomics-*-macos-*.dmg.sha256
+            ${{ env.APP_DIR }}/pclradiomics-macos-cli.zip
+          generate_release_notes: true

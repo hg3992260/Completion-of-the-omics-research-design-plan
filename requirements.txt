@@ -1,0 +1,18 @@
+# 组学研究设计工作台 · 运行与打包依赖
+# 建议 Python 3.11 / 3.12（PyCt6 要求 >=3.9,<3.14）
+
+# 图形界面框架与主题库
+PySide6>=6.11,<7
+PyCt6>=6.1.0
+
+# MCP 服务器与 HTTP 传输（会带上 httpx / anyio / starlette / uvicorn / sse-starlette / pydantic）
+mcp>=1.29,<2
+
+# HTTPS 根证书（冻结后 Windows 证书库可能枚举失败，需随包携带 certifi）
+certifi
+
+# 导出 Word（.docx）：标题层级 + 检查表表格
+python-docx>=1.1
+
+# 打包
+pyinstaller>=6.18,<7

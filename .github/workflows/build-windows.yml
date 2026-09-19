@@ -1,0 +1,138 @@
+name: build-windows
+
+# 在 Windows 上把本程序打成"一个 exe 承载全部模式"的绿色包，并作为构建产物/Release 附件上传。
+#
+# 触发方式：
+#   - 推到 main/master：跑一次构建并上传 artifact
+#   - 推 tag（v1.0.0 之类）：额外创建 Release 并附上 zip
+#   - 手动触发：Actions → build-windows → Run workflow（可选 onefile / service-only）
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      onefile:
+        description: 同时构建单文件版（启动慢，但只有一个 exe）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write          # 打 tag 时创建 Release 需要
+
+env:
+  # 若本仓库的应用位于子目录（例如 omics_pipeline/），把这里改成那个目录即可
+  APP_DIR: "."
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"        # PyCt6 支持 3.9–3.13，3.11 与本地开发环境一致
+          cache: pip
+          cache-dependency-path: ${{ env.APP_DIR }}/requirements.txt
+
+      - name: 安装依赖
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 导入自检（不依赖网络与密钥）
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -c "import cli, design_studio, ui_kit, mcp_server, api_server, app_paths, win_stdio; print('imports OK')"
+          python cli.py paths
+          python cli.py stages | Select-Object -First 3
+          python mcp_server.py --list-tools
+          exit 0
+        shell: pwsh
+
+      - name: 打包（合并版：界面 + MCP + API，一个 exe）
+        working-directory: ${{ env.APP_DIR }}
+        run: python -m PyInstaller --noconfirm --clean pclradiomics.spec
+
+      - name: 把只读资源拷到 exe 同级
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          New-Item -ItemType Directory -Force "dist/PCLRadiomics/projects" | Out-Null
+          Copy-Item theme_tech.json, logo_icon.ico, logo_badge.png, logo_banner.png "dist/PCLRadiomics/" -Force
+        shell: pwsh
+
+      - name: 校验产物
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (-not (Test-Path "dist/PCLRadiomics/PCLRadiomics.exe")) { throw "未生成 exe" }
+          $exe = "dist/PCLRadiomics/PCLRadiomics.exe"
+          & $exe paths
+          & $exe stages | Select-Object -First 3
+          # 冻结后资源与 stdio 接管是否正常（同时验证 PyCt6 主题、certifi、win_stdio）
+          # check 会联网列模型：CI 里通常没有密钥，失败不作为构建失败
+          & $exe check | Select-Object -Last 6
+          if ($LASTEXITCODE -ne 0) { Write-Host "check 未通过（多半是未配置 API Key），不阻塞构建" }
+          exit 0
+        shell: pwsh
+
+      - name: 真实模型连通性（仅在配置了 DEEPSEEK_API_KEY secret 时执行）
+        if: ${{ github.event_name != 'pull_request' }}
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if (-not $env:DEEPSEEK_API_KEY) { Write-Host "未配置 secret，跳过"; exit 0 }
+          & "dist/PCLRadiomics/PCLRadiomics.exe" check
+        shell: pwsh
+
+      - name: 打单文件版（手动勾选 onefile，或推 tag 发版时自动）
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.onefile) || startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          PCL_ONEFILE: "1"
+        run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile pclradiomics.spec
+
+      - name: 校验单文件版
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.onefile) || startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $exe = "dist-onefile/PCLRadiomics.exe"
+          if (-not (Test-Path $exe)) { throw "未生成单文件 exe" }
+          Write-Host ("单文件体积: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB))
+          & $exe stages | Select-Object -First 2
+          exit 0
+        shell: pwsh
+
+      - name: 打 zip（onedir）
+        working-directory: ${{ env.APP_DIR }}
+        run: Compress-Archive -Path "dist/PCLRadiomics/*" -DestinationPath "PCLRadiomics-windows-x64.zip" -Force
+        shell: pwsh
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCLRadiomics-windows-x64
+          path: |
+            ${{ env.APP_DIR }}/PCLRadiomics-windows-x64.zip
+            ${{ env.APP_DIR }}/dist-onefile/*.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 打 tag 时创建 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.APP_DIR }}/PCLRadiomics-windows-x64.zip
+            ${{ env.APP_DIR }}/dist-onefile/*.exe
+          generate_release_notes: true

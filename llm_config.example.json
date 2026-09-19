@@ -1,0 +1,11 @@
+{
+  "_说明": "复制为 llm_config.json 后按需修改。也可以完全不建这个文件：程序会依次尝试 环境变量 DEEPSEEK_API_KEY / LLM_API_KEY、以及 ~/.dsh/.credentials.yaml。",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-pro",
+  "temperature": 0.4,
+  "max_tokens": 8000,
+  "timeout": 240,
+  "api_key": "",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "credential_name": "DEEPSEEK_API_KEY"
+}
