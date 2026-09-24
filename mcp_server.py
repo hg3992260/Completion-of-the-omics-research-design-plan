@@ -36,6 +36,7 @@ from design_agent import (Project, DesignAgent, parse_sections, pick,
                           parse_questions, parse_checklist, q_text)
 from llm_client import LLMClient, load_config
 from stages_data import STAGES
+from app_paths import APP_VERSION
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -44,6 +45,11 @@ except ImportError:                                                # pragma: no 
     raise
 
 mcp = FastMCP("pcliomics-workbench")
+# FastMCP 未暴露 version 参数：直接设置底层 Server 的版本，让 MCP 握手带上它
+try:
+    mcp._mcp_server.version = APP_VERSION
+except Exception:  # noqa: BLE001
+    pass
 _client: LLMClient | None = None
 _model_override: str | None = None
 

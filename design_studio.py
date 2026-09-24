@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import subprocess
 import time
@@ -27,13 +28,22 @@ from PyCt6 import (CMainWindow, CTopLevel, CFrame, CLabel, CButton, CLineEdit,
                    CTextEdit, CComboBox, set_appearance_mode, set_color_theme, ModeManager)
 
 from design_agent import (Project, DesignAgent, parse_sections, pick,
-                          parse_questions, parse_checklist, q_text, SYSTEM_PROMPT)
+                          parse_questions, parse_checklist, q_text, SYSTEM_PROMPT,
+                          parse_convergence)
 from llm_client import LLMClient, load_config, save_config, mask
 from stages_data import STAGES
+import shape_data as shape
+import stat_data as stat
+import scope_core
+import coupling
+from shape_data import SHAPE
+from stat_data import STAGES as STAT_STAGES
 from ui_kit import (PAL, C, UI_FONT, MONO_FONT, mk_label, clear_layout,
                     ProgressBar, TranscriptView, stream_format, status_key,
                     WorkScroll, fit_height, text_height, BusyIndicator, CreditBar,
-                    ThinkingButton, screen_size)
+                    ThinkingButton, screen_size,
+                    Card, FlowStepper, draw_backdrop, CARD_PAD, install_button_skin,
+                    pair_brush, CheckBox3D, RefitLabel)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 from app_paths import resource_path, data_path
@@ -47,7 +57,8 @@ SHOW_SPLASH = True                                     # 需要时改 False 关�
 
 PHASE_LABEL = {"raw": "等待输入", "kickoff": "速读中", "ask": "追问中", "answer": "等待回答",
                "rewrite": "改写中", "draft": "等待采纳", "idle": "空闲", "final": "汇总中"}
-STATUS_LABEL = {"todo": "未开始", "asked": "已追问", "drafted": "待采纳", "done": "已收录"}
+STATUS_LABEL = {"todo": "未开始", "asked": "已追问", "drafted": "待采纳", "done": "已收录",
+                "doing": "进行中"}
 
 
 # --------------------------------------------------------------------------- 后台线程
@@ -57,17 +68,18 @@ class LLMThread(QtCore.QThread):
     failed = Signal(str)
 
     def __init__(self, client: LLMClient, messages: list, stream: bool = True, parent=None,
-                 max_tokens: int | None = None):
+                 max_tokens: int | None = None, reason: bool = False):
         super().__init__(parent)
         self.client, self.messages, self.stream = client, messages, stream
         self.max_tokens = max_tokens
+        self.reason = reason
 
     def run(self):
         try:
             out = self.client.chat(self.messages, stream=self.stream,
                                    on_delta=(lambda p, k: self.delta.emit(p, k))
                                    if self.stream else None,
-                                   max_tokens=self.max_tokens)
+                                   max_tokens=self.max_tokens, reason=self.reason)
             self.finished_ok.emit(out)
         except Exception as e:                                     # noqa: BLE001
             self.failed.emit(str(e))
@@ -141,6 +153,7 @@ class StageRail(QWidget):
             self.stageClicked.emit(i)
 
     def paintEvent(self, event):
+        """步骤条三维化：凹槽轨道 + 金属旋钮 + 进度填充，一眼看清流程先后与位置。"""
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         f_t = QtGui.QFont(UI_FONT, 10)
@@ -148,54 +161,99 @@ class StageRail(QWidget):
         f_s = QtGui.QFont(UI_FONT, 8)
         f_n = QtGui.QFont(MONO_FONT, 9)
         f_n.setBold(True)
+        n = len(self.stages)
+        # ---- 轨道凹槽：贯穿所有旋钮的一根槽，已完成的段落被强调色填充 ----
+        track_x = self.PAD + 20
+        y0 = self._rect(0).center().y()
+        y1 = self._rect(n - 1).center().y()
+        def groove(x, ya, yb, filled):
+            p.setPen(QtGui.QPen(QtGui.QColor(C("groove_hi")), 5.0,
+                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QtCore.QPointF(x, ya), QtCore.QPointF(x, yb))
+            p.setPen(QtGui.QPen(QtGui.QColor(C("groove_lo")), 3.0,
+                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QtCore.QPointF(x, ya), QtCore.QPointF(x, yb))
+            if filled > 0:
+                p.setPen(QtGui.QPen(QtGui.QColor(C("accent")), 3.0,
+                                    Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QtCore.QPointF(x, ya), QtCore.QPointF(x, ya + filled))
+        groove(track_x, y0, y1, 0)
+        # 已走过的段落（到当前旋钮中心）填强调色 → 流程推进可见
+        cur_center = self._rect(self.current).center().y()
+        if self.current > 0:
+            groove(track_x, y0, cur_center, cur_center - y0)
         for i, st in enumerate(self.stages):
             r = self._rect(i)
             state = self.states.get(st["id"], "todo")
             active = (i == self.current)
             hovered = (i == self.hover)
-            # 连接线
-            if i < len(self.stages) - 1:
-                x = r.left() + 20
-                done = state == "done"
-                pen = QtGui.QPen(QtGui.QColor(C("ok") if done else C("grid")))
-                pen.setWidthF(1.6)
-                p.setPen(pen)
-                p.drawLine(QtCore.QPointF(x, r.bottom()), QtCore.QPointF(x, r.bottom() + self.GAP))
-            bg = C("node_active") if active else (C("node_hover") if hovered else C("node"))
-            if active:
-                glow = QtGui.QColor(C("accent"))
-                glow.setAlpha(40)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(glow)
-                p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), 12, 12)
-            p.setBrush(QtGui.QColor(bg))
+            done = state in ("done", "drafted", "asked")
+            cx, cy = r.left() + 20, r.center().y()
+            # ---- 卡片面：抬起（投影在自身矩形内） ----
+            p.setPen(Qt.PenStyle.NoPen)
+            if active or hovered:
+                col = QtGui.QColor(C("shadow"))
+                col.setAlpha(58 if active else 30)
+                p.setBrush(col)
+                p.drawRoundedRect(r.adjusted(1, 3, -1, 5), 10, 10)
+            brush = pair_brush("surf_hi", "surf_lo", r) if (active or hovered) else \
+                    pair_brush("knob_hi", "knob_lo", r)
+            p.setBrush(brush)
+            p.drawRoundedRect(r, 10, 10)
+            # 倒角：上亮下暗（抬起）／上暗下亮（未到 = 内嵌感）
+            if active or hovered:
+                p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_hi")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + 8, r.top() + 1.0),
+                           QtCore.QPointF(r.right() - 8, r.top() + 1.0))
+                p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_lo")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + 8, r.bottom() - 1.0),
+                           QtCore.QPointF(r.right() - 8, r.bottom() - 1.0))
+            else:
+                p.setPen(QtGui.QPen(QtGui.QColor(C("groove_hi")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + 8, r.top() + 1.0),
+                           QtCore.QPointF(r.right() - 8, r.top() + 1.0))
+                p.setPen(QtGui.QPen(QtGui.QColor(C("groove_lo")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + 8, r.bottom() - 1.0),
+                           QtCore.QPointF(r.right() - 8, r.bottom() - 1.0))
             pen = QtGui.QPen(QtGui.QColor(C("accent") if active else
                                           (C("accent_dim") if hovered else C("border"))))
-            pen.setWidthF(1.8 if active else 1.0)
+            pen.setWidthF(1.6 if active else 1.0)
             p.setPen(pen)
-            p.drawRoundedRect(r, 10, 10)
-            # 序号点
-            cx, cy = r.left() + 20, r.center().y()
-            dot = {"done": C("ok"), "drafted": C("accent"), "asked": C("warn")}.get(state, None)
-            if dot:
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QtGui.QColor(dot))
-                p.drawEllipse(QtCore.QPointF(cx, cy), 10, 10)
-                p.setPen(QtGui.QPen(QtGui.QColor(C("surface2"))))
-                p.setFont(f_n)
-                p.drawText(QRectF(cx - 10, cy - 9, 20, 18), Qt.AlignCenter,
-                           "✓" if state == "done" else f"{st['id']:02d}")
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+            # ---- 金属旋钮 ----
+            kr = QRectF(cx - 11, cy - 11, 22, 22)
+            p.setPen(Qt.PenStyle.NoPen)
+            if active or done:
+                sh = QtGui.QColor(C("shadow"))
+                sh.setAlpha(60)
+                p.setBrush(sh)
+                p.drawEllipse(kr.adjusted(0.5, 2.0, -0.5, 2.5))
+            if state == "done":
+                face = pair_brush("ok_hi", "ok_lo", kr)
+            elif active:
+                face = pair_brush("accent_hi", "accent_lo", kr)
+            elif state in ("drafted", "asked"):
+                face = pair_brush("warn_hi", "warn_lo", kr)
             else:
-                col = QtGui.QColor(C("accent") if active else C("muted"))
-                pen = QtGui.QPen(col)
-                pen.setWidthF(1.5)
-                p.setPen(pen)
-                p.setBrush(QtGui.QColor(C("surface")))
-                p.drawEllipse(QtCore.QPointF(cx, cy), 10, 10)
-                p.setFont(f_n)
-                p.drawText(QRectF(cx - 10, cy - 9, 20, 18), Qt.AlignCenter, f"{st['id']:02d}")
-            # 文本
-            tx = cx + 18
+                face = pair_brush("knob_hi", "knob_lo", kr)
+            p.setBrush(face)
+            p.drawEllipse(kr)
+            # 旋钮上缘高光（金属感）
+            hl = QtGui.QColor("#FFFFFF")
+            hl.setAlpha(120 if ModeManager.mode != "dark" else 80)
+            p.setBrush(hl)
+            p.drawEllipse(QRectF(kr.left() + 3.5, kr.top() + 2.0, kr.width() - 7, 5.0))
+            p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_lo")), 1.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(kr.adjusted(0.5, 0.5, -0.5, -0.5))
+            printed = "✓" if state == "done" else f"{st['id']:02d}"
+            p.setPen(QtGui.QPen(QtGui.QColor(
+                "#FFFFFF" if (active or state == "done") else C("muted_dim"))))
+            p.setFont(f_n)
+            p.drawText(QRectF(cx - 11, cy - 9.5, 22, 19), Qt.AlignCenter, printed)
+            # ---- 文本 ----
+            tx = cx + 17
             p.setPen(QtGui.QPen(QtGui.QColor(C("text"))))
             p.setFont(f_t)
             p.drawText(QRectF(tx, cy - 20, r.width() - (tx - r.left()) - 8, 20),
@@ -205,6 +263,735 @@ class StageRail(QWidget):
             p.drawText(QRectF(tx, cy + 1, r.width() - (tx - r.left()) - 8, 18),
                        Qt.AlignLeft | Qt.AlignVCenter,
                        f"{STATUS_LABEL.get(state, state)} · {st['spec']}")
+
+
+# --------------------------------------------------------------------------- SCI Shape
+
+class CheckRow(QWidget):
+    """自检项一行：勾选框 + 可换行文本；点击整行也可切换。"""
+    toggled = Signal(int, bool)
+
+    def __init__(self, master, idx: int, text: str, checked: bool, width_px: int = 320):
+        super().__init__(master)
+        self.idx = idx
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(8)
+        self.box = CheckBox3D(self, checked)
+        self.box.setFixedWidth(18)
+        self.box.toggled.connect(lambda on: self.toggled.emit(self.idx, on))
+        lay.addWidget(self.box, 0, Qt.AlignTop)
+        self.lbl = mk_label(self, text, size=9, width_px=width_px, wrap=True,
+                            color=PAL["text"])
+        lay.addWidget(self.lbl, 1)
+        self._style()
+
+    def _style(self):
+        """三维勾选框：凹陷槽 + 选中时的渐变与对勾。"""
+        self.box._change_theme()
+
+    def set_checked(self, on: bool):
+        self.box.blockSignals(True)
+        self.box.setChecked(bool(on))
+        self.box.blockSignals(False)
+
+    def is_checked(self) -> bool:
+        return self.box.isChecked()
+
+    def mousePressEvent(self, event):
+        self.box.setChecked(not self.box.isChecked())      # 触发 stateChanged → toggled
+        event.accept()
+
+    def _change_theme(self):
+        self._style()
+
+
+class ScopePage:
+    """通用「scope 环节 + 本稿自评」三栏页：Statistic 与 SCI Shape 共用同一模板。
+
+    子类只需实现 head_text / goal_text / render_detail / extra_text 四个内容钩子，
+    布局、步骤条、自检勾选、完成度与持久化全部在这里统一处理。
+    """
+
+    def __init__(self, win, *, store_key: str, data: list, rail_title: str,
+                 side_title: str, unit: str):
+        self.win = win
+        self.store_key = store_key
+        self.data = data
+        self.unit = unit
+        self.cur = 0
+
+        body = QWidget(win)
+        self.body = body
+        blay = QHBoxLayout(body)
+        blay.setContentsMargins(0, 0, 0, 0)
+        blay.setSpacing(14)
+
+        # 左栏：环节步骤条（复用 StageRail）
+        left = Card(win, margin=(14, 14, 14, 14), spacing=10)
+        self.left = left
+        left.setFixedWidth(320 + 2 * CARD_PAD)      # 外形尺寸与原先的板面一致
+        ll = left.layout()
+        ll.addWidget(mk_label(left, rail_title, size=12, bold=True,
+                              color=PAL["accent"], width_px=280))
+        self.scroll = WorkScroll(left)
+        self.rail = StageRail(self.scroll, data)
+        self.rail.stageClicked.connect(self.pick)
+        self.scroll.setWidget(self.rail)
+        self.scroll.setMinimumHeight(180)
+        ll.addWidget(self.scroll, 1)
+        self.left_status = mk_label(left, "", size=9, width_px=280, color=PAL["muted"])
+        ll.addWidget(self.left_status)
+        # 流程导航：上一环节 / 下一环节（显式体现先后）
+        nav = QWidget(left)
+        nl = QHBoxLayout(nav)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(8)
+        self.btn_prev = CButton(master=nav, text="◀ 上一环节", width=124, height=30,
+                                font_family=UI_FONT, font_size=9,
+                                command=lambda: self.step_by(-1),
+                                background_color=PAL["btn"], text_color=PAL["text"],
+                                hover_color=PAL["btn_hover"], border_color=PAL["border"])
+        self.btn_next = CButton(master=nav, text="下一环节 ▶", width=124, height=30,
+                                font_family=UI_FONT, font_size=9,
+                                command=lambda: self.step_by(1),
+                                background_color=PAL["accent"], text_color=PAL["on_accent"],
+                                hover_color=PAL["accent_hover"])
+        self.btn_prev.setFixedWidth(124)          # PyCt6 会按内边距加宽，这里锁死防重叠
+        self.btn_next.setFixedWidth(124)
+        nl.addWidget(self.btn_prev)
+        nl.addWidget(self.btn_next)
+        ll.addWidget(nav)
+        ll.addWidget(CButton(master=left, text="返回工作台", width=280, height=30,
+                             font_family=UI_FONT, font_size=9, command=win.show_workspace,
+                             background_color=PAL["btn"], text_color=PAL["text"],
+                             hover_color=PAL["btn_hover"], border_color=PAL["border"]))
+        blay.addWidget(left)
+
+        # 中栏：所选环节的 scope 详情
+        center = Card(win, margin=(18, 14, 18, 14), spacing=8)
+        self.center = center
+        cl = center.layout()
+        head = QWidget(center)
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(10)
+        self.head = mk_label(head, "", size=15, bold=True, color=PAL["accent"],
+                             width_px=330, wrap=False)
+        hl.addWidget(self.head, 1)
+        cl.addWidget(head)
+        # 出处/单元信息独占一行：避免与标题在同一行互抢宽度而被挤没
+        self.spec = mk_label(center, "", size=9, color=PAL["muted"], width_px=330,
+                             wrap=False)
+        cl.addWidget(self.spec)
+        self.goal = mk_label(center, "", size=10, width_px=560, wrap=True,
+                             color=PAL["text"], bg=PAL["surface2"], radius=8, min_h=44)
+        cl.addWidget(self.goal)
+        # 模式切换：结构内容 ⇄ 引导完善（引导式对话按内容补齐本环节）
+        mode_row = QWidget(center)
+        ml = QHBoxLayout(mode_row)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(8)
+        self.btn_content = CButton(master=mode_row, text="结构内容", width=104, height=28,
+                                   font_family=UI_FONT, font_size=9,
+                                   command=lambda: self.set_mode("content"))
+        self.btn_guide = CButton(master=mode_row, text="引导完善", width=104, height=28,
+                                 font_family=UI_FONT, font_size=9,
+                                 command=lambda: self.set_mode("guide"))
+        self.btn_content.setFixedWidth(104)
+        self.btn_guide.setFixedWidth(104)
+        ml.addWidget(self.btn_content)
+        ml.addWidget(self.btn_guide)
+        ml.addStretch(1)
+        self.guide_state = mk_label(mode_row, "", size=9, width_px=260, wrap=False,
+                                    color=PAL["muted"])
+        ml.addWidget(self.guide_state)
+        cl.addWidget(mode_row)
+
+        self.center_stack = QtWidgets.QStackedWidget(center)
+        self.detail = WorkScroll(self.center_stack)
+        self.detail_host = QWidget()
+        self.detail_lay = QVBoxLayout(self.detail_host)
+        self.detail_lay.setContentsMargins(2, 2, 6, 2)
+        self.detail_lay.setSpacing(3)
+        self.detail.setWidget(self.detail_host)
+        self.center_stack.addWidget(self.detail)                 # 0 结构内容
+        self.center_stack.addWidget(self._build_guide(self.center_stack))  # 1 引导完善
+        cl.addWidget(self.center_stack, 1)
+        self._mode = "content"
+        blay.addWidget(center, 1)
+
+        # 右栏：完成度与自检
+        side = Card(win, margin=(16, 14, 16, 14), spacing=8)
+        self.side = side
+        side.setFixedWidth(384 + 2 * CARD_PAD)
+        rl = side.layout()
+        rl.addWidget(mk_label(side, side_title, size=12, bold=True,
+                              color=PAL["accent"], width_px=340))
+        self.prog = ProgressBar(side, width=344, height=8)
+        rl.addWidget(self.prog)
+        self.prog_lbl = mk_label(side, "", size=9, width_px=340, color=PAL["muted"])
+        rl.addWidget(self.prog_lbl)
+        self.guide_lbl = mk_label(side, "", size=9, width_px=340, color=PAL["muted"],
+                                  bg=PAL["surface2"], radius=8, min_h=30)
+        rl.addWidget(self.guide_lbl)
+        self.extra_lbl = mk_label(side, "", size=9, width_px=340, color=PAL["muted"])
+        rl.addWidget(self.extra_lbl)
+        self.check_scroll = WorkScroll(side)
+        self.check_host = QWidget()
+        self.check_lay = QVBoxLayout(self.check_host)
+        self.check_lay.setContentsMargins(0, 0, 4, 0)
+        self.check_lay.setSpacing(2)
+        self.check_scroll.setWidget(self.check_host)
+        rl.addWidget(self.check_scroll, 1)
+        row = QWidget(side)
+        rwl = QHBoxLayout(row)
+        rwl.setContentsMargins(0, 0, 0, 0)
+        rwl.setSpacing(8)
+        for text, on in (("全选", True), ("清空", False)):
+            b = CButton(master=row, text=text, width=146, height=30,
+                        font_family=UI_FONT, font_size=9,
+                        command=(lambda o=on: self.bulk(o)),
+                        background_color=PAL["btn"], text_color=PAL["text"],
+                        hover_color=PAL["btn_hover"],
+                        border_color=PAL["border"])
+            b.setFixedWidth(146)
+            rwl.addWidget(b)
+        rl.addWidget(row)
+        blay.addWidget(side)
+
+    # ---------------------------------------------------------------- 数据与状态
+    @property
+    def store(self) -> dict:
+        d = getattr(self.win.project, self.store_key, None)
+        if d is None:
+            d = {}
+            setattr(self.win.project, self.store_key, d)
+        return d
+
+    def section(self) -> dict:
+        return self.data[max(0, min(len(self.data) - 1, self.cur))]
+
+    # ---------------------------------------------------------------- 交互
+    def pick(self, idx: int):
+        self.cur = idx
+        self.refresh()
+
+    def step_by(self, delta: int):
+        """按流程顺序前后移动一个环节（显式体现先后）。"""
+        self.pick(max(0, min(len(self.data) - 1, self.cur + delta)))
+
+    def on_check(self, idx: int, on: bool):
+        sec = self.section()
+        scope_core.set_check(self.store, sec["key"], idx, on)
+        self.win._flush_project()
+        QtCore.QTimer.singleShot(0, self.refresh)   # 延后重建：信号来自将被销毁的行
+
+    def bulk(self, on: bool):
+        sec = self.section()
+        scope_core.set_all(self.store, sec, on)
+        self.win._flush_project()
+        self.refresh()
+
+    # ---------------------------------------------------------------- 渲染
+    def _block_title(self, text: str, sub: str = ""):
+        wrap = QWidget(self.detail_host)
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(0, 10, 0, 2)
+        wl.setSpacing(1)
+        wl.addWidget(mk_label(wrap, text, size=11, bold=True, width_px=560,
+                              wrap=False, color=PAL["accent"]))
+        if sub:
+            wl.addWidget(mk_label(wrap, sub, size=8, width_px=560, wrap=False,
+                                  color=PAL["muted"]))
+        return wrap
+
+    def _line(self, text: str, color=None, bold: bool = False, size: int = 9):
+        return mk_label(self.detail_host, text, size=size, bold=bold, width_px=560,
+                        wrap=True, color=color or PAL["text"])
+
+    def refresh(self):
+        if not self.data:
+            return
+        self.cur = max(0, min(len(self.data) - 1, self.cur))
+        sec = self.section()
+        states = {s["id"]: scope_core.state(self.store, s) for s in self.data}
+        self.rail.set_states(states, self.cur)
+
+        done, doing, ticks = scope_core.overall(self.store, self.data)
+        self.left_status.label().setText(
+            f"已完成 {done}/{len(self.data)} {self.unit}　·　进行中 {doing}　·　"
+            f"自检 {ticks}/{scope_core.total_checks(self.data)} 项")
+        self.head.label().setText(self.head_text(sec))
+        self.spec.label().setText(sec.get("spec", ""))
+        self.goal.label().setText(self.goal_text(sec))
+        # 流程导航按钮状态（首/末环节置灰）
+        self.btn_prev.setEnabled(self.cur > 0)
+        self.btn_next.setEnabled(self.cur < len(self.data) - 1)
+        self.btn_next.button().setText(
+            "下一环节 ▶" if self.cur < len(self.data) - 1 else "已到末环节")
+        self.render_detail(sec)
+        self._fill_checks(sec, states)
+        self._style_mode_buttons()
+        self.refresh_guide()
+        self.refit_all()
+        QtCore.QTimer.singleShot(0, self.refit_all)   # 布局稳定后再校一次
+
+    def refit_all(self):
+        """内容重建/窗口变化后，强制所有换行标签按实际宽度重算高度（防止文字被压）。"""
+        for lbl in self.body.findChildren(RefitLabel):
+            try:
+                lbl.fit_now()
+            except Exception:                                   # noqa: BLE001
+                pass
+
+    def _fill_checks(self, sec: dict, states: dict):
+        lay, host = self.check_lay, self.check_host
+        clear_layout(lay)
+        got = scope_core.checked(self.store, sec["key"])
+        for i, text in enumerate(sec["checks"]):
+            row = CheckRow(host, i, text, bool(got.get(str(i))), width_px=298)
+            row.toggled.connect(self.on_check)
+            lay.addWidget(row)
+        lay.addStretch(1)
+        done, total = scope_core.progress(self.store, sec)
+        self.prog.set_value(done / total if total else 0.0)
+        # 进度条宽度跟随右栏实际内容宽度（避免在窄窗口下越出卡片）
+        avail = max(180, self.side.width() - 2 * CARD_PAD - 32 - 6)
+        if self.prog.width() != avail:
+            self.prog.setFixedWidth(avail)
+        st = states.get(sec["id"], "todo")
+        self.prog_lbl.label().setText(
+            f"本{self.unit}自检 {done}/{total} 项　·　状态："
+            f"{scope_core.STATUS_LABEL.get(st, st)}")
+        self.extra_lbl.label().setText(self.extra_text(sec))
+
+    # ---------------------------------------------------------------- 引导式对话
+    def _build_guide(self, parent) -> QWidget:
+        """引导完善面板：对话流（流式）+ 追问回答 / 定稿工作区 + 操作按钮。"""
+        page = QWidget(parent)
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        self.guide_transcript = TranscriptView(page)
+        self.guide_transcript.setMinimumHeight(110)
+        lay.addWidget(self.guide_transcript, 1)
+
+        self.guide_scroll = WorkScroll(page)
+        self.guide_host = QWidget()
+        self.guide_lay = QVBoxLayout(self.guide_host)
+        self.guide_lay.setContentsMargins(2, 2, 6, 2)
+        self.guide_lay.setSpacing(6)
+        self.guide_scroll.setWidget(self.guide_host)
+        self.guide_scroll.setMinimumHeight(190)
+        lay.addWidget(self.guide_scroll, 2)
+
+        row = QWidget(page)
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(8)
+        self.btn_guide_start = CButton(master=row, text="开始引导", width=112, height=32,
+                                       font_family=UI_FONT, font_size=9,
+                                       command=self.start_guide,
+                                       background_color=PAL["accent"],
+                                       text_color=PAL["on_accent"],
+                                       hover_color=PAL["accent_hover"])
+        self.btn_guide_submit = CButton(master=row, text="提交回答", width=112, height=32,
+                                        font_family=UI_FONT, font_size=9,
+                                        command=self.submit_guide_answers)
+        self.btn_guide_regen = CButton(master=row, text="生成定稿", width=112, height=32,
+                                       font_family=UI_FONT, font_size=9,
+                                       command=self.run_guide_rewrite)
+        self.btn_guide_accept = CButton(master=row, text="采纳并收录", width=124, height=32,
+                                        font_family=UI_FONT, font_size=9,
+                                        command=self.accept_guide_draft)
+        for b in (self.btn_guide_start, self.btn_guide_submit, self.btn_guide_regen,
+                  self.btn_guide_accept):
+            b.setFixedWidth(112 if b is not self.btn_guide_accept else 124)
+            rl.addWidget(b)
+        rl.addStretch(1)
+        lay.addWidget(row)
+        self.guide_answer_rows = []
+        self.guide_draft_box = None
+        self._guide_busy = False
+        return page
+
+    def set_mode(self, mode: str):
+        self._mode = mode
+        if hasattr(self, "center_stack"):
+            self.center_stack.setCurrentIndex(0 if mode == "content" else 1)
+        self._style_mode_buttons()
+
+    def _style_mode_buttons(self):
+        on = getattr(self, "_mode", "content") == "guide"
+        for btn, active in ((self.btn_content, not on), (self.btn_guide, on)):
+            btn._background_color = PAL["accent"] if active else PAL["btn"]
+            btn._text_color = PAL["on_accent"] if active else PAL["text"]
+            btn._hover_color = PAL["accent_hover"] if active else PAL["btn_hover"]
+            btn._change_theme()
+
+    def node(self, sec: dict | None = None) -> dict:
+        """取（并补齐）当前环节的引导状态。"""
+        return scope_core.node(self.store, (sec or self.section())["key"])
+
+    def start_guide(self):
+        if self.win._busy():
+            return
+        sec = self.section()
+        self.set_mode("guide")
+        self._guide_busy = True
+        self.refresh_guide()
+        self.guide_transcript.add_rule()
+        self.guide_transcript.add_header(f"{sec['title']}｜引导追问", "agent",
+                                         time.strftime("%H:%M"))
+        self.win._run(self.win.agent.scope_ask_messages(self.store_key, sec),
+                      on_done=lambda out: self._after_guide_ask(sec, out),
+                      view=self.guide_transcript)
+
+    def _after_guide_ask(self, sec: dict, out: dict):
+        node = self.node(sec)
+        s = parse_sections(out["content"])
+        node["assessment"] = pick(s, "现状评估")
+        node["questions"] = parse_questions(pick(s, "必须澄清", "问题"))
+        node["answers"] = ["" for _ in node["questions"]]
+        node["status"] = "asked" if node["questions"] else "todo"
+        node["model"] = out.get("model", "")
+        node["updated"] = time.strftime("%H:%M")
+        self._guide_busy = False
+        self.win._flush_project()
+        self.refresh()
+        self.set_mode("guide")
+
+    def submit_guide_answers(self):
+        if self.win._busy() or not self.guide_answer_rows:
+            return
+        sec = self.section()
+        node = self.node(sec)
+        node["answers"] = [self.win._answer_text(e) for e in self.guide_answer_rows]
+        self.guide_transcript.add_header("研究者回答", "user", time.strftime("%H:%M"))
+        lines = [f"{i + 1}. {q_text(q)}\n　→ {a or '（未回答，按常规做法给建议值）'}"
+                 for i, (q, a) in enumerate(zip(node["questions"], node["answers"]))]
+        self.guide_transcript.add_text_block("\n".join(lines) + "\n")
+        self.win._flush_project()
+        self.run_guide_rewrite()
+
+    def run_guide_rewrite(self):
+        if self.win._busy():
+            return
+        sec = self.section()
+        self._guide_busy = True
+        self.refresh_guide()
+        self.guide_transcript.add_header(f"{sec['title']}｜定稿", "agent",
+                                         time.strftime("%H:%M"))
+        self.win._run(self.win.agent.scope_rewrite_messages(self.store_key, sec),
+                      on_done=lambda out: self._after_guide_rewrite(sec, out),
+                      view=self.guide_transcript)
+
+    def _after_guide_rewrite(self, sec: dict, out: dict):
+        node = self.node(sec)
+        s = parse_sections(out["content"])
+        node["draft"] = pick(s, "定稿", "改写稿")
+        node["risks"] = pick(s, "风险提示")
+        node["next"] = pick(s, "下一步")
+        node["checklist"] = pick(s, "检查表")
+        node["status"] = "drafted" if node["draft"] else node["status"]
+        node["updated"] = time.strftime("%H:%M")
+        self._guide_busy = False
+        self.win._flush_project()
+        self.refresh()
+        self.set_mode("guide")
+        # 定稿是工作区最后一块，生成后自动滚到底，省得用户再找
+        if node.get("draft"):
+            def _to_draft():
+                bar = self.guide_scroll.verticalScrollBar()
+                bar.setValue(bar.maximum())
+            QtCore.QTimer.singleShot(80, _to_draft)
+
+    def accept_guide_draft(self):
+        sec = self.section()
+        if self.guide_draft_box is None:
+            self.win._toast("当前没有待采纳的定稿，请先「开始引导 → 提交回答」")
+            return
+        node = self.node(sec)
+        node["final"] = self.guide_draft_box.text_edit().toPlainText().strip()
+        node["status"] = "done"
+        node["updated"] = time.strftime("%H:%M")
+        # 按模型的检查表判断自动勾选自检项（编号优先，其次文本匹配）
+        ticked = 0
+        for idx, ok in scope_core.parse_suggestions(node.get("checklist", ""),
+                                                    sec.get("checks", [])):
+            scope_core.set_check(self.store, sec["key"], idx, ok)
+            ticked += 1 if ok else 0
+        self.win._flush_project()
+        self.refresh()
+        self.set_mode("guide")
+        self.win._sync_flow({"stat": 1, "shape": 2}.get(self.store_key, 0))
+        self.win._toast(f"已收录「{sec['title']}」定稿（{len(node['final'])} 字，"
+                        f"自检勾选 {ticked} 项）")
+
+    def refresh_guide(self):
+        """重建引导工作区：现状评估 / 追问回答 / 定稿与检查表建议。"""
+        if not hasattr(self, "guide_lay"):
+            return
+        sec = self.section()
+        node = scope_core.node(self.store, sec["key"])
+        st = scope_core.guide_status(self.store, sec["key"])
+        words = len((node.get("final") or node.get("draft") or "").strip())
+        busy = "　·　正在生成…" if getattr(self, "_guide_busy", False) else ""
+        self.guide_state.label().setText(
+            f"{scope_core.GUIDE_STATUS.get(st, st)}{f'　·　{words} 字' if words else ''}{busy}")
+        self.guide_lbl.label().setText(
+            f"引导：{scope_core.GUIDE_STATUS.get(st, st)}"
+            + (f"　·　定稿 {len(node['final'])} 字" if node.get("final") else "")
+            + (f"　·　有定稿待采纳" if (not node.get("final") and node.get("draft")) else ""))
+        lay, host = self.guide_lay, self.guide_host
+        clear_layout(lay)
+        self.guide_answer_rows = []
+        self.guide_draft_box = None
+        if node.get("assessment"):
+            lay.addWidget(mk_label(host, "现状评估", size=11, bold=True,
+                                   color=PAL["accent"], width_px=560, wrap=False))
+            lay.addWidget(mk_label(host, node["assessment"], size=9, width_px=560,
+                                   wrap=True, color=PAL["text"], bg=PAL["surface2"],
+                                   radius=8, min_h=36))
+        if node.get("questions"):
+            lay.addWidget(mk_label(host, "追问（回答后可生成定稿）", size=11, bold=True,
+                                   color=PAL["accent"], width_px=560, wrap=False))
+            for i, q in enumerate(node["questions"]):
+                title = q.get("q") if isinstance(q, dict) else str(q)
+                why = (q.get("why") if isinstance(q, dict) else "") or ""
+                lay.addWidget(mk_label(host, f"Q{i + 1}　{title}", size=10, bold=True,
+                                       width_px=560, wrap=True, color=PAL["text"]))
+                if why:
+                    lay.addWidget(mk_label(host, "为什么问：" + why, size=8, width_px=560,
+                                           wrap=True, color=PAL["muted"]))
+                box = CTextEdit(master=host, width=520, height=54, font_family=UI_FONT,
+                                font_size=9,
+                                text=(node["answers"][i] if i < len(node["answers"]) else ""))
+                lay.addWidget(box)
+                self.guide_answer_rows.append(box)
+        if node.get("draft"):
+            lay.addWidget(mk_label(host, "定稿（可直接编辑后采纳）", size=11, bold=True,
+                                   color=PAL["accent"], width_px=560, wrap=False))
+            self.guide_draft_box = CTextEdit(master=host, width=520, height=190,
+                                             font_family=UI_FONT, font_size=9,
+                                             text=node["draft"])
+            lay.addWidget(self.guide_draft_box)
+            if node.get("risks"):
+                lay.addWidget(mk_label(host, "风险提示：\n" + node["risks"], size=9,
+                                       width_px=560, wrap=True, color=PAL["bad"],
+                                       bg=PAL["surface2"], radius=8, min_h=34))
+            tips = scope_core.parse_suggestions(node.get("checklist", ""),
+                                                sec.get("checks", []))
+            if tips:
+                ok = [str(i + 1) for i, v in tips if v]
+                no = [str(i + 1) for i, v in tips if not v]
+                lay.addWidget(mk_label(
+                    host, "模型判定：已满足 " + ("、".join(ok) or "—")
+                    + "；待补 " + ("、".join(no) or "—")
+                    + "（采纳时会自动勾选已满足项）", size=9, width_px=560, wrap=True,
+                    color=PAL["muted"]))
+        if node.get("final"):
+            lay.addWidget(mk_label(host, "已收录定稿", size=11, bold=True,
+                                   color=PAL["ok"], width_px=560, wrap=False))
+            lay.addWidget(mk_label(host, node["final"], size=9, width_px=560, wrap=True,
+                                   color=PAL["text"], bg=PAL["surface2"], radius=8,
+                                   min_h=40))
+        if not lay.count():
+            lay.addWidget(mk_label(
+                host, "这个环节还没有内容。点「开始引导」：模型会带着本环节的规范要求"
+                      "和本项目已有的相关定稿，先给出「现状评估」，再提出必须澄清的问题；"
+                      "你回答后它会产出可直接采纳的定稿，并按检查表给出勾选建议。",
+                size=9, width_px=560, wrap=True, color=PAL["muted"]))
+        # 按钮可用性
+        busy = self.win._busy()
+        self.btn_guide_start.setEnabled(not busy)
+        self.btn_guide_submit.setEnabled(bool(node.get("questions")) and not busy)
+        self.btn_guide_regen.setEnabled(bool(node.get("questions")) and not busy)
+        self.btn_guide_accept.setEnabled(bool(node.get("draft")) and not busy)
+
+    def inferred_for_section(self, sec: dict) -> dict | None:
+        """从模型的收敛推理结果里取出与本环节对应的一章。
+
+        匹配依据是**模型自己输出的章节名**（拿本环节标题里的英文词去对），
+        代码里不存在"哪一章对应哪个环节"的固定表。
+        """
+        conv = getattr(self.win.project, "convergence", None) or {}
+        chapters = conv.get("chapters") or []
+        if not chapters:
+            return None
+        m = re.search(r"([A-Za-z][A-Za-z \-]{2,})", sec.get("title", "") or "")
+        eng = (m.group(1).strip().lower() if m else "")
+        if not eng:
+            return None
+        return next((ch for ch in chapters
+                     if eng in (ch.get("title") or "").lower()), None)
+
+    # ---------------------------------------------------------------- 子类钩子
+    def head_text(self, sec: dict) -> str:
+        return sec["title"]
+
+    def goal_text(self, sec: dict) -> str:
+        return sec.get("goal", "")
+
+    def render_detail(self, sec: dict):
+        raise NotImplementedError
+
+    def extra_text(self, sec: dict) -> str:
+        return ""
+
+
+class StatScopePage(ScopePage):
+    """Statistic 页：科学问题统计计算与归纳的 9 阶段（含常用检验速查表）。"""
+
+    def __init__(self, win):
+        super().__init__(win, store_key="stat", data=STAT_STAGES,
+                         rail_title="统计九阶段", side_title="完成度与自检",
+                         unit="阶段")
+
+    def head_text(self, sec):
+        return f"{sec['icon']} {self.cur + 1:02d} · {sec['title']}"
+
+    def goal_text(self, sec):
+        return "本阶段要做什么：" + sec["desc"]
+
+    def render_detail(self, sec):
+        lay = self.detail_lay
+        clear_layout(lay)
+        cat = stat.CATS.get(sec["cat"], {"n": sec["cat"], "c": C("accent")})
+        lay.addWidget(mk_label(self.detail_host, f"{cat['n']} · 阶段 {sec['id']}/9",
+                               size=8, width_px=560, wrap=True, color="#FFFFFF",
+                               bg=cat["c"], radius=9, min_h=26))
+        # 目标 / 核心动作
+        lay.addWidget(self._block_title(sec.get("goal_title", "目标")))
+        for t in sec["goal"]:
+            lay.addWidget(self._line("·　" + t))
+        # 示例化表述
+        if sec.get("example"):
+            lay.addWidget(self._block_title(sec.get("example_title", "示例化表述")))
+            for ln in str(sec["example"]).split("\n"):
+                lay.addWidget(mk_label(self.detail_host, ln, size=9, width_px=560,
+                                       wrap=True, color=PAL["muted"],
+                                       bg=PAL["surface2"], radius=8, min_h=32))
+        # 公式
+        if sec.get("formula"):
+            lay.addWidget(self._block_title("公式与参数"))
+            for f in sec["formula"]:
+                lay.addWidget(mk_label(self.detail_host, f, size=9, width_px=560,
+                                       wrap=True, color=PAL["text"], bg=PAL["surface2"],
+                                       radius=8, min_h=30))
+        # 常见陷阱
+        lay.addWidget(self._block_title("常见陷阱", "✓ 做对的样子见右栏自检"))
+        for t in sec["pitfalls"]:
+            lay.addWidget(self._line("✕　" + t, color=PAL["bad"]))
+        # 输出
+        if sec.get("output"):
+            lay.addWidget(self._block_title(sec.get("output_title", "输出")))
+            for t in sec["output"]:
+                lay.addWidget(self._line("→　" + t, color=PAL["ok"]))
+        # 速查表（只挂在「检验计算」阶段）
+        if sec["id"] == 6:
+            lay.addWidget(self._block_title("常用检验速查表",
+                                            "场景 → 方法 · 前提 · scipy · R"))
+            for row in stat.CHEATSHEET:
+                lay.addWidget(mk_label(self.detail_host, f"{row[0]} → {row[1]}",
+                                       size=9, bold=True, width_px=560, wrap=True,
+                                       color=PAL["accent"]))
+                lay.addWidget(mk_label(
+                    self.detail_host,
+                    f"　　前提：{row[2]}　｜　scipy：{row[3]}　｜　R：{row[4]}",
+                    size=8, width_px=560, wrap=True, color=PAL["muted"]))
+            lay.addWidget(mk_label(
+                self.detail_host,
+                "stat_run_test 支持 16 种 kind：" + "、".join(stat.TEST_KINDS),
+                size=8, width_px=560, wrap=True, color=PAL["muted"]))
+        if sec.get("note"):
+            lay.addWidget(self._block_title("说明"))
+            lay.addWidget(mk_label(self.detail_host, sec["note"], size=9, width_px=560,
+                                   wrap=True, color=PAL["muted"], bg=PAL["surface2"],
+                                   radius=8, min_h=34))
+        lay.addSpacing(10)
+
+    def extra_text(self, sec):
+        lines = []
+        tools = sec.get("tools") or []
+        lines.append("对应工具：" + ("、".join(tools) if tools else
+                                 "本阶段无计算工具（由数据准备脚本承担，决策需留痕）"))
+        lines.append("与其他页面的关系由模型在引导对话中自行判断：它会通读项目全部素材，"
+                     "决定哪些与本阶段相关（代码不设固定映射）。")
+        lines.append("架构来源：9 阶段状态机 + 12 个工具（7 控制 / 5 计算），计算层纯 numpy+scipy。")
+        return "\n".join(lines)
+
+
+class ShapeScopePage(ScopePage):
+    """SCI Shape 页：七章通用结构与本稿自评（原实现迁移到通用模板）。"""
+
+    def __init__(self, win):
+        super().__init__(win, store_key="shape", data=SHAPE,
+                         rail_title="SCI 七章环节", side_title="完成度与自检",
+                         unit="章")
+
+    def head_text(self, sec):
+        return f"{self.cur + 1:02d} · {sec['title']}"
+
+    def goal_text(self, sec):
+        return "功能定位：" + sec["goal"]
+
+    def render_detail(self, sec):
+        lay = self.detail_lay
+        clear_layout(lay)
+        lay.addWidget(self._block_title(
+            f"通用模型（{len(sec['model'])} 个组件）", "按原书顺序，见 " + sec["spec"]))
+        for i, m in enumerate(sec["model"], 1):
+            lay.addWidget(mk_label(self.detail_host, f"{i:02d}　{m['en']}", size=9,
+                                   bold=True, width_px=560, wrap=True, color=PAL["text"]))
+            zh = re.sub(r"^[①-⑳]\s*", "", m["zh"])
+            lay.addWidget(mk_label(self.detail_host, "　　　" + zh, size=9, width_px=560,
+                                   wrap=True, color=PAL["muted"]))
+        lay.addWidget(self._block_title("内容边界", "✓ 必须写进去　✕ 不得写进去"))
+        for t in sec["must"]:
+            lay.addWidget(self._line("✓　" + t, color=PAL["ok"]))
+        for t in sec["must_not"]:
+            lay.addWidget(self._line("✕　" + t, color=PAL["bad"]))
+        if sec["language"]:
+            lay.addWidget(self._block_title("语言与时态", "括号内为书内页码"))
+            for r in sec["language"]:
+                lay.addWidget(self._line(f"·　{r['rule']}（{r['page']}）"))
+        if sec["phrases"]:
+            lay.addWidget(self._block_title("词块组", "英文原短语 + 书内页码"))
+            for g in sec["phrases"]:
+                lay.addWidget(mk_label(self.detail_host,
+                                       f"{g['group']}　（书 {g['page']}）", size=9,
+                                       bold=True, width_px=560, wrap=True,
+                                       color=PAL["accent"]))
+                lay.addWidget(mk_label(self.detail_host, "　　" + "；".join(g["items"]),
+                                       size=9, width_px=560, wrap=True,
+                                       color=PAL["muted"]))
+        if sec.get("note"):
+            lay.addWidget(self._block_title("说明"))
+            lay.addWidget(mk_label(self.detail_host, sec["note"], size=9, width_px=560,
+                                   wrap=True, color=PAL["muted"], bg=PAL["surface2"],
+                                   radius=8, min_h=34))
+        lay.addSpacing(10)
+
+    def extra_text(self, sec):
+        """右栏补充：显示**模型推理**给出的本章来源/缺口（没有推理结果就提示去总览跑）。"""
+        ch = self.inferred_for_section(sec)
+        if not ch:
+            return ("本章与其他页面素材的关系由模型推理判断：在总览点「开始推理」，"
+                    "模型会说明本章的来源、已有、缺失与就绪度。")
+        rd = ch.get("readiness")
+        lines = []
+        if ch.get("sources"):
+            lines.append("模型判断来源：" + ch["sources"])
+        if ch.get("missing") and ch["missing"].strip() not in ("无", "—", "-"):
+            lines.append("尚缺：" + ch["missing"])
+        if isinstance(rd, int):
+            lines.append(f"就绪度 {rd}%")
+        if ch.get("reason"):
+            lines.append("理由：" + ch["reason"])
+        return "\n".join(lines) or "（模型未给出本章结论）"
 
 
 # --------------------------------------------------------------------------- 设置弹窗
@@ -574,11 +1361,13 @@ class StudioWindow(CMainWindow):
         self.answer_rows = []
         self.pending_draft = ""
         self.final_mode = False
+        install_button_skin()          # 保证任何构造路径下按钮都有立体皮肤
 
         root = QVBoxLayout()
         root.setContentsMargins(18, 16, 18, 10)
-        root.setSpacing(12)
+        root.setSpacing(10)
         root.addWidget(self._build_header())
+        root.addWidget(self._build_flow())
 
         body = QWidget(self)
         blay = QHBoxLayout(body)
@@ -589,10 +1378,12 @@ class StudioWindow(CMainWindow):
         blay.addWidget(self._build_center(), 1)
         blay.addWidget(self._build_right())
 
-        # 工作台 / 总览 两个视图共存于同一窗口，按钮切换
+        # 工作台 / Statistic / SCI Shape / 总览 四个视图共存于同一窗口，按钮切换
         self.body_stack = QtWidgets.QStackedWidget(self)
-        self.body_stack.addWidget(body)              # 0 工作台
-        self.body_stack.addWidget(self._build_overview())   # 1 总览
+        self.body_stack.addWidget(body)                        # 0 工作台
+        self.body_stack.addWidget(self._build_stat_page())      # 1 Statistic
+        self.body_stack.addWidget(self._build_shape_page())     # 2 SCI Shape
+        self.body_stack.addWidget(self._build_overview())       # 3 总览
         root.addWidget(self.body_stack, 1)
 
         root.addWidget(self._build_footer())
@@ -600,8 +1391,8 @@ class StudioWindow(CMainWindow):
         self.setLayout(root)
 
         self._apply_responsive()
-        self._style_tab(self.tab_work, True)
-        self._style_tab(self.tab_over, False)
+        self._apply_root_bg()
+        self._sync_flow(0)
         self._view = "work"
         self._welcome()
         self._refresh_all()
@@ -611,21 +1402,85 @@ class StudioWindow(CMainWindow):
             self.show_raw_input()
         self._fetch_models()
 
+    # ---------------------------------------------------------------- Statistic / SCI Shape
+    def _build_stat_page(self) -> QWidget:
+        self.stat_page = StatScopePage(self)
+        return self.stat_page.body
+
+    def _build_shape_page(self) -> QWidget:
+        self.shape_page = ShapeScopePage(self)
+        return self.shape_page.body
+
+    def show_stat(self):
+        self.stat_page.refresh()
+        self.body_stack.setCurrentIndex(1)
+        self._sync_flow(1)
+        self._view = "stat"
+
+    def show_sci_shape(self):
+        self.shape_page.refresh()
+        self.body_stack.setCurrentIndex(2)
+        self._sync_flow(2)
+        self._view = "shape"
+
+    def _build_flow(self) -> Card:
+        """流程条：把四个视图按先后顺序做成三维键帽（设计 → 统计 → 结构 → 总览）。"""
+        card = Card(self, margin=(16, 7, 16, 7), spacing=0)
+        self.flow_card = card
+        self.flow = FlowStepper(card, [
+            {"title": "设计工作台", "sub": "十阶段追问与改写"},
+            {"title": "统计 Statistic", "sub": "九阶段计算与归纳"},
+            {"title": "SCI 结构 Shape", "sub": "七章 scope 自评"},
+            {"title": "总览 Overview", "sub": "评分与检查表"},
+        ], height=42)
+        self.flow.stepClicked.connect(self.goto_step)
+        card.layout().addWidget(self.flow)
+        return card
+
+    def goto_step(self, idx: int):
+        """点击流程条上的步骤 → 跳到对应视图。"""
+        steps = (self.show_workspace, self.show_stat, self.show_sci_shape,
+                 self.show_overview)
+        steps[max(0, min(len(steps) - 1, idx))]()
+
+    def _sync_flow(self, idx: int):
+        """同步流程条：当前步骤抬起，之前的步骤打勾，并把各视图进度挂成角标。"""
+        if not hasattr(self, "flow"):
+            return
+        self.flow.set_current(idx)
+        try:
+            self.flow.set_badge(0, f"阶段 {self.current_index() + 1}/10")
+            done, doing, ticks = scope_core.overall(self.project.stat, STAT_STAGES)
+            self.flow.set_badge(1, f"自评 {ticks}/{scope_core.total_checks(STAT_STAGES)}")
+            done2, doing2, ticks2 = scope_core.overall(self.project.shape, SHAPE)
+            self.flow.set_badge(2, f"自评 {ticks2}/{scope_core.total_checks(SHAPE)}")
+            counts = {"ok": 0, "warn": 0, "bad": 0}
+            for st in STAGES:
+                s = self.project.stage(st["id"]).get("status", "todo")
+                counts["ok" if s == "done" else ("warn" if s in ("drafted", "asked")
+                                                 else "bad")] += 1
+            self.flow.set_badge(3, f"定稿 {counts['ok']}/10")
+            # 总览角标：模型给出过就绪度就用它，否则退回事实计数
+            chapters = (getattr(self.project, "convergence", None) or {}).get("chapters") or []
+            ready = [c.get("readiness") for c in chapters
+                     if isinstance(c.get("readiness"), int)]
+            if ready:
+                self.flow.set_badge(3, f"就绪 {sum(ready) // len(ready)}%")
+        except Exception:                                       # noqa: BLE001
+            pass
+
     # ---------------------------------------------------------------- 总览视图
-    def _build_overview(self) -> CFrame:
-        """只读表格：十阶段 × 状态 / 规范出处 / 结果 / 检查表 / 更新时间，红黄绿标记。"""
-        page = CFrame(self, border_width=1, corner_radius=12,
-                      background_color=PAL["surface"])
+    def _build_overview(self) -> Card:
+        """总览 = 收敛视图（三路输入 → 七章）+ 十阶段评分与检查表明细。"""
+        page = Card(self, margin=(20, 16, 20, 16), spacing=10, deep=True)
         lay = page.layout()
-        lay.setContentsMargins(20, 16, 20, 16)
-        lay.setSpacing(10)
 
         head = QWidget(page)
         hl = QHBoxLayout(head)
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(12)
-        hl.addWidget(mk_label(head, "管线视图 · 评分与检查表", size=15, bold=True,
-                              color=PAL["accent"], width_px=260, wrap=False))
+        hl.addWidget(mk_label(head, "总览 · 收敛视图与评分", size=15, bold=True,
+                              color=PAL["accent"], width_px=300, wrap=False))
         self.ov_summary = mk_label(head, "", size=10, width_px=520, wrap=False,
                                    color=PAL["muted"])
         hl.addWidget(self.ov_summary, 1)
@@ -642,8 +1497,89 @@ class StudioWindow(CMainWindow):
                              hover_color=PAL["btn_hover"], border_color=PAL["border"]))
         lay.addWidget(head)
 
+        # 收敛视图整体可滚动（下面还有十阶段明细表，页面高度会超出窗口）
+        self.ov_scroll = WorkScroll(page)
+        self.ov_host = QWidget()
+        self.ov_lay = QVBoxLayout(self.ov_host)
+        self.ov_lay.setContentsMargins(0, 0, 6, 0)
+        self.ov_lay.setSpacing(8)
+
+        # ① 收敛推理（reason 模式）：章节归属、完整度与缺口全部由模型推断
+        crow = QWidget(self.ov_host)
+        crl = QHBoxLayout(crow)
+        crl.setContentsMargins(0, 0, 0, 0)
+        crl.setSpacing(10)
+        crl.addWidget(mk_label(crow, "收敛推理（reason 模式）", size=12, bold=True,
+                               color=PAL["accent"], width_px=200, wrap=False))
+        self.conv_state = mk_label(crow, "", size=9, width_px=520, wrap=False,
+                                   color=PAL["muted"])
+        crl.addWidget(self.conv_state, 1)
+        self.btn_conv = CButton(master=crow, text="开始推理", width=104, height=30,
+                                font_family=UI_FONT, font_size=9,
+                                command=self.run_convergence,
+                                background_color=PAL["accent"],
+                                text_color=PAL["on_accent"],
+                                hover_color=PAL["accent_hover"])
+        self.btn_conv_re = CButton(master=crow, text="重新推理", width=104, height=30,
+                                   font_family=UI_FONT, font_size=9,
+                                   command=self.run_convergence,
+                                   background_color=PAL["btn"],
+                                   text_color=PAL["text"],
+                                   hover_color=PAL["btn_hover"],
+                                   border_color=PAL["border"])
+        self.btn_conv.setFixedWidth(104)
+        self.btn_conv_re.setFixedWidth(104)
+        crl.addWidget(self.btn_conv)
+        crl.addWidget(self.btn_conv_re)
+        self.ov_lay.addWidget(crow)
+
+        self.conv_transcript = TranscriptView(self.ov_host)
+        self.conv_transcript.setMinimumHeight(120)
+        self.ov_lay.addWidget(self.conv_transcript)
+
+        self.conv_summary = mk_label(self.ov_host, "", size=10, width_px=980, wrap=True,
+                                     color=PAL["text"], bg=PAL["surface2"], radius=8,
+                                     min_h=36)
+        self.ov_lay.addWidget(self.conv_summary)
+        self.conv_host = QWidget(self.ov_host)
+        self.conv_lay = QVBoxLayout(self.conv_host)
+        self.conv_lay.setContentsMargins(0, 0, 0, 0)
+        self.conv_lay.setSpacing(6)
+        self.ov_lay.addWidget(self.conv_host)
+
+        # ② 三条工作线完成度（纯事实统计）
+        lanes = QWidget(self.ov_host)
+        ll = QHBoxLayout(lanes)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(10)
+        self.ov_lane_bars, self.ov_lane_lbls = {}, {}
+        for key, name, desc in coupling.LANES:
+            box = Card(lanes, margin=(12, 9, 12, 9), spacing=3)
+            bl = box.layout()
+            bl.addWidget(mk_label(box, name, size=10, bold=True, width_px=280,
+                                  wrap=False, color=PAL["accent"]))
+            bl.addWidget(mk_label(box, desc, size=8, width_px=280, wrap=True,
+                                  color=PAL["muted"]))
+            row = QWidget(box)
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(8)
+            bar = ProgressBar(row, width=150, height=8)
+            rl.addWidget(bar)
+            lbl = mk_label(row, "", size=9, width_px=120, wrap=False, color=PAL["muted"])
+            rl.addWidget(lbl, 1)
+            bl.addWidget(row)
+            self.ov_lane_bars[key] = bar
+            self.ov_lane_lbls[key] = lbl
+            ll.addWidget(box, 1)
+        self.ov_lay.addWidget(lanes)
+
+        # ⑤ 十阶段评分与检查表明细（原表格）
+        self.ov_lay.addWidget(mk_label(self.ov_host, "十阶段评分与检查表明细（设计工作台）",
+                                       size=11, bold=True, color=PAL["accent"],
+                                       width_px=300, wrap=False))
         self.ov_cols = ["#", "阶段", "状态", "规范出处", "结果 / 待办", "检查表", "更新"]
-        self.ov_table = QtWidgets.QTableWidget(0, len(self.ov_cols), page)
+        self.ov_table = QtWidgets.QTableWidget(0, len(self.ov_cols), self.ov_host)
         self.ov_table.setHorizontalHeaderLabels(self.ov_cols)
         self.ov_table.verticalHeader().setVisible(False)
         self.ov_table.setShowGrid(False)
@@ -657,7 +1593,10 @@ class StudioWindow(CMainWindow):
                 self.ov_table.setColumnWidth(i, w)
         self.ov_table.horizontalHeader().setSectionResizeMode(
             4, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        lay.addWidget(self.ov_table, 1)
+        self.ov_lay.addWidget(self.ov_table)
+        self.ov_lay.addStretch(1)
+        self.ov_scroll.setWidget(self.ov_host)
+        lay.addWidget(self.ov_scroll, 1)
         return page
 
     def _style_table(self):
@@ -672,28 +1611,19 @@ class StudioWindow(CMainWindow):
             f" font-family: '{UI_FONT}'; font-size: 10pt; font-weight: bold; }}"
             f"QTableCornerButton::section {{ background: {C('accent')}; border: none; }}")
 
-    @staticmethod
-    def _style_tab(btn, active: bool):
-        btn._background_color = PAL["accent"] if active else PAL["btn"]
-        btn._text_color = PAL["on_accent"] if active else PAL["text"]
-        btn._hover_color = PAL["accent_hover"] if active else PAL["btn_hover"]
-        btn._change_theme()
-
     def show_overview(self):
         self.refresh_overview()
-        self.body_stack.setCurrentIndex(1)
-        self._style_tab(self.tab_work, False)
-        self._style_tab(self.tab_over, True)
+        self.body_stack.setCurrentIndex(3)
+        self._sync_flow(3)
         self._view = "overview"
 
     def show_workspace(self):
         self.body_stack.setCurrentIndex(0)
-        self._style_tab(self.tab_work, True)
-        self._style_tab(self.tab_over, False)
+        self._sync_flow(0)
         self._view = "work"
 
     def refresh_overview(self):
-        """按十阶段结果重建表格（只读）。"""
+        """重建总览：收敛视图（三路 → 七章）+ 十阶段评分明细（只读）。"""
         self._style_table()
         tone = {"done": "ok", "drafted": "warn", "asked": "warn", "todo": "bad"}
         label = {"done": "已完成", "drafted": "待采纳", "asked": "已追问", "todo": "未开始"}
@@ -752,18 +1682,118 @@ class StudioWindow(CMainWindow):
             f"● 红 {counts['bad']} 未开始　·　"
             f"共 {done}/10 阶段定稿")
         self.ov_progress.set_value(done / len(STAGES))
+        # 明细表按内容定高（外层滚动容器负责翻页）
+        self.ov_table.setFixedHeight(40 * len(rows) + 44)
+        self.refresh_convergence()
+
+    def run_convergence(self):
+        """让模型在 reason 模式下推断：每条素材收敛到哪一章、各章还缺什么。"""
+        if self._busy():
+            return
+        self.conv_transcript.add_rule()
+        self.conv_transcript.add_header("收敛推理（reason 模式）", "agent",
+                                        time.strftime("%H:%M"))
+        self.conv_state.label().setText("正在推理…（推理过程会以弱化色实时显示）")
+        self._run(self.agent.convergence_messages(), on_done=self._after_convergence,
+                  view=self.conv_transcript, reason=True)
+
+    def _after_convergence(self, out: dict):
+        data = parse_convergence(out["content"])
+        data["updated"] = time.strftime("%Y-%m-%d %H:%M")
+        data["model"] = out.get("model", "")
+        data["elapsed"] = round(float(out.get("elapsed") or 0), 1)
+        data["reasoning"] = (out.get("reasoning") or "")[:8000]
+        self.project.convergence = data
+        self._flush_project()
+        self.refresh_convergence()
+        self._sync_flow(3)
+        self._toast(f"收敛推理完成：{len(data['chapters'])} 章 · "
+                    f"{len(data['actions'])} 条下一步动作")
+
+    def refresh_convergence(self):
+        """渲染模型给出的收敛结论；未推理时给出一条引导。"""
+        conv = getattr(self.project, "convergence", None) or {}
+        chapters = conv.get("chapters") or []
+        reasoning = conv.get("reasoning") or ""
+        self.conv_state.label().setText(
+            (f"已更新 · {conv.get('updated', '')} · {conv.get('model', '')}"
+             f" · {conv.get('elapsed', '')}s · {len(chapters)} 章")
+            if chapters else
+            "尚未推理 · 点「开始推理」由模型自行判断各章来源与缺口")
+        for lane in coupling.lane_progress(self.project):
+            bar = self.ov_lane_bars.get(lane["key"])
+            lbl = self.ov_lane_lbls.get(lane["key"])
+            if bar is None:
+                continue
+            bar.set_value(lane["done"] / max(1, lane["total"]))
+            lbl.label().setText(f"{lane['done']}/{lane['total']} {lane['unit']}")
+        self.btn_conv.setEnabled(not self._busy())
+        self.btn_conv_re.setEnabled(not self._busy() and bool(chapters))
+        # 总览摘要
+        if chapters or conv.get("overall"):
+            txt = conv.get("overall") or ""
+            if conv.get("basis"):
+                txt += ("\n判定依据：" + conv["basis"]) if txt else conv["basis"]
+            self.conv_summary.label().setText(txt or "（模型未给出总览）")
+            self.conv_summary.setVisible(True)
+        else:
+            self.conv_summary.setVisible(False)
+        lay, host = self.conv_lay, self.conv_host
+        clear_layout(lay)
+        if not chapters:
+            if reasoning:
+                lay.addWidget(mk_label(host, "上次推理过程（未解析出章节）", size=10,
+                                       bold=True, color=PAL["accent"], width_px=960,
+                                       wrap=False))
+                lay.addWidget(mk_label(host, reasoning[:1200], size=9, width_px=960,
+                                       wrap=True, color=PAL["muted"],
+                                       bg=PAL["surface2"], radius=8, min_h=40))
+            return
+        for ch in chapters:
+            box = Card(host, margin=(12, 9, 12, 9), spacing=3)
+            bl = box.layout()
+            head = QWidget(box)
+            hl = QHBoxLayout(head)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(10)
+            hl.addWidget(mk_label(head, ch.get("title", ""), size=11, bold=True,
+                                  width_px=260, wrap=False, color=PAL["accent"]))
+            rd = ch.get("readiness")
+            if isinstance(rd, int):
+                tone = "ok" if rd >= 80 else ("warn" if rd >= 40 else "bad")
+                pill = mk_label(head, f"就绪度 {rd}%", size=9, width_px=110, wrap=False,
+                                color="#FFFFFF", bg=PAL[tone], radius=9, min_h=26)
+                pill.setFixedWidth(110)
+                hl.addWidget(pill)
+            hl.addStretch(1)
+            bl.addWidget(head)
+            for label, key, color in (("来源", "sources", PAL["muted"]),
+                                      ("已有", "have", PAL["text"]),
+                                      ("缺失", "missing", PAL["bad"]),
+                                      ("理由", "reason", PAL["muted"])):
+                val = (ch.get(key) or "").strip()
+                if not val:
+                    continue
+                bl.addWidget(mk_label(box, f"{label}：{val}", size=9, width_px=940,
+                                      wrap=True, color=color))
+            lay.addWidget(box)
+        if conv.get("actions"):
+            lay.addWidget(mk_label(host, "下一批动作（模型按优先级排序）", size=11,
+                                   bold=True, color=PAL["accent"], width_px=400,
+                                   wrap=False))
+            for i, a in enumerate(conv["actions"], 1):
+                lay.addWidget(mk_label(host, f"{i}. {a}", size=9, width_px=960,
+                                       wrap=True, color=PAL["text"]))
 
     # ---------------------------------------------------------------- 头部
-    def _build_header(self) -> CFrame:
-        h = CFrame(self, layout_type="horizontal", border_width=1, corner_radius=12,
-                   background_color=PAL["surface"])
+    def _build_header(self) -> Card:
+        h = Card(self, horizontal=True, margin=(20, 14, 18, 14), spacing=10)
         self.header = h
-        h.setFixedHeight(96)
+        h.setFixedHeight(108 + 2 * CARD_PAD)    # 外形比原先的 96 略高，容下两行副标题
         lay = h.layout()
-        lay.setContentsMargins(20, 14, 18, 14)
-        lay.setSpacing(10)
 
         titles = QWidget(h)
+        self.titles = titles
         titles.setMinimumWidth(300)                 # 窄窗口时允许收缩，不再压住右侧控件
         titles.setMaximumWidth(620)
         titles.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -784,25 +1814,14 @@ class StudioWindow(CMainWindow):
         cl.setSpacing(2)
         cl.addWidget(mk_label(col, "组学研究设计工作台", size=15, bold=True,
                               width_px=560, wrap=True))
-        cl.addWidget(mk_label(col, "贴入初步设想 → 十阶段逐段追问与改写 → 输出可执行研究设计",
-                              size=8, color=PAL["muted"], width_px=560, wrap=True))
+        self.subtitle = mk_label(col, "贴入初步设想 → 十阶段逐段追问与改写 → 输出可执行研究设计",
+                                 size=8, color=PAL["muted"], width_px=560, wrap=True)
+        cl.addWidget(self.subtitle)
         tl.addWidget(col, 1)
         lay.addWidget(titles)
 
-        # 视图切换：工作台 / 总览
-        tabs = QWidget(h)
-        tl2 = QHBoxLayout(tabs)
-        tl2.setContentsMargins(0, 0, 0, 0)
-        tl2.setSpacing(6)
-        self.tab_work = CButton(master=tabs, text="工作台", width=76, height=30,
-                                font_family=UI_FONT, font_size=9,
-                                command=self.show_workspace)
-        self.tab_over = CButton(master=tabs, text="总览", width=76, height=30,
-                                font_family=UI_FONT, font_size=9,
-                                command=self.show_overview)
-        tl2.addWidget(self.tab_work)
-        tl2.addWidget(self.tab_over)
-        lay.addWidget(tabs)
+        # 流程导航已由上方「流程条」承担，页头只保留标题与项目/模型/设置
+        lay.addWidget(titles)
 
         lay.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.MinimumExpanding,
                                 QSizePolicy.Policy.Minimum))
@@ -822,6 +1841,25 @@ class StudioWindow(CMainWindow):
                                hover_color=PAL["btn_hover"],
                                border_color=PAL["border"])
         lay.addWidget(self.new_btn)
+        # 一级界面直接改名 / 删除当前项目（不必再进「管理」弹窗）
+        self.rename_btn = CButton(master=h, text="改名", width=64, height=30,
+                                  font_family=UI_FONT, font_size=9,
+                                  command=self.rename_current_project,
+                                  background_color=PAL["btn"],
+                                  text_color=PAL["text"],
+                                  hover_color=PAL["btn_hover"],
+                                  border_color=PAL["border"],
+                                  tooltip="给当前项目改名（项目文件一并改名）")
+        lay.addWidget(self.rename_btn)
+        self.delete_btn = CButton(master=h, text="删除", width=64, height=30,
+                                  font_family=UI_FONT, font_size=9,
+                                  command=self.delete_current_project,
+                                  background_color=PAL["btn"],
+                                  text_color=PAL["danger"],
+                                  hover_color=PAL["danger_bg"],
+                                  border_color=PAL["border"],
+                                  tooltip="删除当前项目（二次确认；删除后自动新建空项目）")
+        lay.addWidget(self.delete_btn)
         self.manage_btn = CButton(master=h, text="管理", width=64, height=30,
                                   font_family=UI_FONT, font_size=9, command=self.manage_projects,
                                   background_color=PAL["accent"],
@@ -855,13 +1893,10 @@ class StudioWindow(CMainWindow):
         return h
 
     # ---------------------------------------------------------------- 左栏
-    def _build_left(self) -> CFrame:
-        col = CFrame(self, border_width=1, corner_radius=12,
-                     background_color=PAL["surface"])
-        col.setFixedWidth(320)
+    def _build_left(self) -> Card:
+        col = Card(self, margin=(14, 14, 14, 14), spacing=10)
+        col.setFixedWidth(320 + 2 * CARD_PAD)
         lay = col.layout()
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(10)
         lay.addWidget(mk_label(col, "十阶段流程", size=12, bold=True,
                                color=PAL["accent"], width_px=280))
         # 步骤条放进滚动容器：窗口变矮时滚动而不是压到下面的按钮上
@@ -874,19 +1909,34 @@ class StudioWindow(CMainWindow):
         self.left_status = mk_label(col, "", size=9, width_px=280,
                                     color=PAL["muted"])
         lay.addWidget(self.left_status)
+        # 阶段导航：显式体现先后（上一阶段 / 下一阶段）
+        nav = QWidget(col)
+        nl = QHBoxLayout(nav)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(8)
+        nl.addWidget(CButton(master=nav, text="◀ 上一阶段", width=124, height=30,
+                             font_family=UI_FONT, font_size=9,
+                             command=lambda: self.set_current(self.current_index() - 1),
+                             background_color=PAL["btn"], text_color=PAL["text"],
+                             hover_color=PAL["btn_hover"], border_color=PAL["border"]))
+        nl.addWidget(CButton(master=nav, text="下一阶段 ▶", width=124, height=30,
+                             font_family=UI_FONT, font_size=9,
+                             command=lambda: self.set_current(self.current_index() + 1),
+                             background_color=PAL["btn"], text_color=PAL["text"],
+                             hover_color=PAL["btn_hover"], border_color=PAL["border"]))
+        for wdg in (nl.itemAt(0).widget(), nl.itemAt(1).widget()):
+            wdg.setFixedWidth(124)                # 锁死宽度，窄窗口下也不会相互重叠
+        lay.addWidget(nav)
         self.btn_go = ThinkingButton(col, width=200, height=36, text="开始本阶段")
         self.btn_go.clicked.connect(self.primary_action)
         lay.addWidget(self.btn_go)
         return col
 
     # ---------------------------------------------------------------- 中栏
-    def _build_center(self) -> CFrame:
-        col = CFrame(self, border_width=1, corner_radius=12,
-                     background_color=PAL["surface"])
+    def _build_center(self) -> Card:
+        col = Card(self, margin=(14, 14, 14, 14), spacing=10)
         self.center_col = col
         lay = col.layout()
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(10)
 
         head = QWidget(col)
         hl = QHBoxLayout(head)
@@ -894,7 +1944,7 @@ class StudioWindow(CMainWindow):
         hl.setSpacing(8)
         self.center_title = mk_label(head, "工作区", size=12, bold=True,
                                      color=PAL["accent"],
-                                     width_px=520, wrap=False)
+                                     width_px=520, wrap=True)
         hl.addWidget(self.center_title, 1)      # 占满剩余宽度，长标题不再被裁切
         self.phase_pill = mk_label(head, "等待输入", size=9, align="center", width_px=110)
         self.phase_pill.setFixedSize(110, 24)
@@ -926,14 +1976,11 @@ class StudioWindow(CMainWindow):
         return max(320, w - 56)
 
     # ---------------------------------------------------------------- 右栏
-    def _build_right(self) -> CFrame:
-        col = CFrame(self, border_width=1, corner_radius=12,
-                     background_color=PAL["surface2"])
-        col.setFixedWidth(420)
+    def _build_right(self) -> Card:
+        col = Card(self, margin=(16, 10, 16, 12), spacing=7)   # 上边距收紧，给文档框让高度
+        col.setFixedWidth(420 + 2 * CARD_PAD)
         self.right_col = col
         lay = col.layout()
-        lay.setContentsMargins(16, 10, 16, 12)      # 上边距收紧，给文档框让高度
-        lay.setSpacing(7)
         head = QWidget(col)
         hl = QHBoxLayout(head)
         hl.setContentsMargins(0, 0, 0, 0)
@@ -995,7 +2042,7 @@ class StudioWindow(CMainWindow):
         # 左下角：响应动画（等待模型时橙色律动 + 计时；空闲时低调灰点）
         self.busy = BusyIndicator(f, width=300, height=30)
         lay.addWidget(self.busy, 0, Qt.AlignVCenter)
-        self.status = mk_label(f, "", size=9, width_px=900,
+        self.status = mk_label(f, "", size=9, width_px=900, wrap=False,
                                color=PAL["muted"])
         lay.addWidget(self.status, 1)
         self.progress = ProgressBar(f, width=160, height=8)
@@ -1005,8 +2052,9 @@ class StudioWindow(CMainWindow):
         wrap.setFixedSize(160, 28)
         wl.addWidget(self.progress, 0, Qt.AlignVCenter)
         lay.addWidget(wrap)
+        # 提示文字固定单行：不给它换行机会，就永远不会超出 38px 的状态栏
         self.tip = mk_label(f, "Space 继续 · Ctrl+S 保存 · Ctrl+E 导出 · ⇧E 出 Word",
-                            size=9, align="right", width_px=260,
+                            size=9, align="right", width_px=260, wrap=False,
                             color=PAL["muted"])
         self.tip.setFixedWidth(280)
         lay.addWidget(self.tip)
@@ -1048,8 +2096,14 @@ class StudioWindow(CMainWindow):
             self.busy.set_idle(self._idle_hint())
         if hasattr(self, "btn_go") and not self.btn_go.is_busy():
             self.btn_go.set_idle_text(self._primary_label())
-        if hasattr(self, "body_stack") and self.body_stack.currentIndex() == 1:
-            self.refresh_overview()
+        if hasattr(self, "body_stack"):
+            idx = self.body_stack.currentIndex()
+            if idx == 3:
+                self.refresh_overview()
+            elif idx == 2:
+                self.shape_page.refresh()
+            elif idx == 1:
+                self.stat_page.refresh()
         if hasattr(self, "project_box"):
             self._sync_project_box()
 
@@ -1062,10 +2116,14 @@ class StudioWindow(CMainWindow):
             f" border:1px solid {C('border')}; border-radius:8px; }}")
 
     def _update_status(self, extra: str = ""):
-        self.status.label().setText(
-            f"项目 {self.project.name}　·　"
-            f"阶段 {self.current_index() + 1}/10 {STAGES[self.current_index()]['title']}"
-            + (f"　·　{extra}" if extra else ""))
+        if getattr(self, "_narrow", False):        # 窄窗口：只留项目与阶段序号
+            txt = (f"项目 {self.project.name}　·　"
+                   f"阶段 {self.current_index() + 1}/10")
+        else:
+            txt = (f"项目 {self.project.name}　·　"
+                   f"阶段 {self.current_index() + 1}/10 "
+                   f"{STAGES[self.current_index()]['title']}")
+        self.status.label().setText(txt + (f"　·　{extra}" if extra else ""))
 
     def current_index(self) -> int:
         return getattr(self, "_cur", 0)
@@ -1113,6 +2171,10 @@ class StudioWindow(CMainWindow):
                 self.project.raw_design = text
         blank = (not self.project.exists_on_disk()
                  and not self.project.raw_design.strip()
+                 and not any((self.project.shape.get(s["key"]) or {}).get("checks")
+                             for s in SHAPE)
+                 and not any((self.project.stat.get(s["key"]) or {}).get("checks")
+                             for s in STAT_STAGES)
                  and all(self.project.stage(st["id"]).get("status", "todo") == "todo"
                          for st in STAGES))
         if blank:
@@ -1193,7 +2255,50 @@ class StudioWindow(CMainWindow):
         ok = proj.delete()
         self._toast(f"已删除「{proj.name}」" if ok else "删除失败（文件可能被占用）")
         if was_current:
-            self.new_project(confirm=False)
+            self._blank_project()          # 换成空白项目，且不立刻落盘
+
+    def rename_current_project(self):
+        """一级界面：给当前项目改名（同步移动项目文件，重名自动加 (2)）。"""
+        dlg = PromptDialog(self, "重命名项目", "新名称：", self.project.name,
+                           placeholder="例如：课题_胰腺囊性病变")
+        dlg.submitted.connect(lambda d: self._rename_current(d["name"]))
+        self._prompt_dlg = dlg                      # 保留引用，避免被回收
+        dlg.show()
+
+    def _rename_current(self, new_name: str):
+        new_name = (new_name or "").strip()
+        if not new_name or new_name == self.project.name:
+            return
+        old = self.project.name
+        self.project.rename(new_name)               # 内部处理文件移动与重名后缀
+        self._refresh_all()
+        self._sync_project_box()
+        self._toast(f"「{old}」已改名为「{self.project.name}」")
+
+    def delete_current_project(self):
+        """一级界面：删除当前项目（二次确认）。"""
+        saved = self.project.exists_on_disk()
+        msg = (f"确定删除当前项目「{self.project.name}」吗？\n"
+               + ("项目文件会一并删除，且不可恢复。" if saved
+                  else "该项目尚未保存到磁盘，将直接清空当前工作区。"))
+        dlg = ConfirmDialog(self, "删除项目", msg, ok_text="确认删除")
+        dlg.confirmed.connect(self._delete_current)
+        self._confirm_dlg = dlg                     # 保留引用，避免被回收
+        dlg.show()
+
+    def _delete_current(self):
+        name = self.project.name
+        if self.project.exists_on_disk():
+            self.delete_project_file(self.project.path)     # 删除文件并换成空白项目
+        else:
+            self._blank_project()
+            self._toast(f"已清空「{name}」")
+
+    def _blank_project(self):
+        """换成空白项目，但**不落盘**——空项目在写入内容前不产生文件（沿用原有约定）。"""
+        fresh = Project(name=f"课题_{time.strftime('%m%d_%H%M')}", model=self.client.model)
+        self._switch_project(fresh, announce=False)
+        self.phase = "raw"
 
     def new_project(self, confirm: bool = True):
         if confirm:
@@ -1290,6 +2395,8 @@ class StudioWindow(CMainWindow):
         set_appearance_mode(mode)
         self.mode_btn.button().setText("深色" if mode == "light" else "浅色")
         self.setWindowBackground(PAL["bg"])
+        self._apply_root_bg()                      # 只给顶层上底色，子控件透明
+        self.update()                              # 底衬渐变随主题重绘
         for w in self.findChildren(QWidget):
             fn = getattr(w, "_change_theme", None)
             if callable(fn):
@@ -1297,8 +2404,16 @@ class StudioWindow(CMainWindow):
                     fn()
                 except Exception:                                  # noqa: BLE001
                     pass
-        if hasattr(self, "body_stack") and self.body_stack.currentIndex() == 1:
-            self.refresh_overview()
+        if hasattr(self, "body_stack"):
+            idx = self.body_stack.currentIndex()
+            if idx == 3:
+                self.refresh_overview()
+            elif idx == 2:
+                self.shape_page.refresh()
+            elif idx == 1:
+                self.stat_page.refresh()
+        if hasattr(self, "phase_pill"):
+            self._set_phase_pill()      # 阶段胶囊为自定义样式，切主题后需重新套用
     def _clear_work(self):
         clear_layout(self.work_lay)
         self.answer_rows = []
@@ -1708,27 +2823,39 @@ class StudioWindow(CMainWindow):
         self._toast("已生成完整草案，可在右侧导出")
 
     # ---------------------------------------------------------------- 线程
-    def _run(self, messages: list, on_done, max_tokens: int | None = None):
+    def _run(self, messages: list, on_done, max_tokens: int | None = None, view=None,
+             reason: bool = False):
+        """跑一次 LLM 调用；view 指定流式输出落到哪个对话视图（默认工作台）。
+
+        reason=True 走推理模式：模型输出正文的同时会把推理过程单独流式推送
+        （kind == "reasoning"），这里用弱化色显示，便于看清结论是怎么推出来的。
+        """
         if self._busy():
             return
-        holder = {"text": ""}
+        tv = view or self.transcript
+        holder = {"text": "", "reason": ""}
 
         def on_delta(piece: str, kind: str):
+            if kind == "reasoning":
+                holder["reason"] += piece
+                tv.stream(piece, "muted")          # 推理过程用弱化色
+                return
             holder["text"] += piece
             if kind == "content":
-                self.transcript.stream(piece)
+                tv.stream(piece)
 
         self.thread = LLMThread(self.client, messages, stream=True, parent=self,
-                                max_tokens=max_tokens)
+                                max_tokens=max_tokens, reason=reason)
         self.thread.delta.connect(on_delta)
         self.thread.failed.connect(self._on_failed)
 
         def finished(out: dict):
             self.thread = None                     # 先释放，避免后续链条被 busy 挡掉
-            self.transcript.end_stream()
+            tv.end_stream()
             out["content"] = out.get("content") or holder["text"]
+            out["reasoning"] = out.get("reasoning") or holder["reason"]
             if not holder["text"].strip() and out["content"].strip():
-                self.transcript.add_text_block(out["content"])   # 重试后的整段补显
+                tv.add_text_block(out["content"])   # 重试后的整段补显
             usage = out.get("usage") or {}
             self._set_busy_ui(False)
             self._update_status(
@@ -1772,21 +2899,53 @@ class StudioWindow(CMainWindow):
         if not hasattr(self, "left_col"):
             return
         narrow = w < 1420
-        self.left_col.setFixedWidth(292 if narrow else 320)
+        pad2 = 2 * CARD_PAD                       # 卡片投影预留量（外形尺寸补偿）
+        self.left_col.setFixedWidth((292 if narrow else 320) + pad2)
         if hasattr(self, "side_col"):
-            self.side_col.setFixedWidth(322 if narrow else 420)
+            self.side_col.setFixedWidth((322 if narrow else 420) + pad2)
+        for page in (getattr(self, "stat_page", None), getattr(self, "shape_page", None)):
+            if page is not None:
+                page.left.setFixedWidth((292 if narrow else 320) + pad2)
+                page.side.setFixedWidth((340 if narrow else 384) + pad2)
+                page.refit_all()                   # 宽度变了 → 立即重算换行高度
         if hasattr(self, "header"):
-            self.header.setFixedHeight(112 if narrow else 96)
+            self.header.setFixedHeight((124 if narrow else 108) + pad2)
+            self.header.layout().setSpacing(6 if narrow else 10)
+        # 窄窗口：隐去「项目 / 模型」这两个说明标签，腾出空间给新建/重命名/删除/管理
+        for nm in ("_lbl_project", "_lbl_model"):
+            wdg = getattr(self, nm, None)
+            if wdg is not None:
+                wdg.setVisible(not narrow)
+        if hasattr(self, "titles"):
+            self.titles.setMinimumWidth(300)        # 保证标题块不被压扁（否则文字互相重叠）
+        if hasattr(self, "subtitle"):
+            self.subtitle.label().setText(
+                "十阶段逐段追问与改写" if narrow
+                else "贴入初步设想 → 十阶段逐段追问与改写 → 输出可执行研究设计")
+            self.subtitle.fit_now()
         for name, wd in (("search", 150 if narrow else 210),
-                         ("project_box", 150 if narrow else 190),
-                         ("model_box", 158 if narrow else 190),
-                         ("new_btn", 54 if narrow else 64),
-                         ("manage_btn", 54 if narrow else 64),
-                         ("settings_btn", 54 if narrow else 64),
-                         ("mode_btn", 54 if narrow else 64)):
+                         ("project_box", 132 if narrow else 190),
+                         ("model_box", 140 if narrow else 190),
+                         ("new_btn", 48 if narrow else 64),
+                         ("rename_btn", 48 if narrow else 64),
+                         ("delete_btn", 48 if narrow else 64),
+                         ("manage_btn", 48 if narrow else 64),
+                         ("settings_btn", 48 if narrow else 64),
+                         ("mode_btn", 48 if narrow else 64)):
             wdg = getattr(self, name, None)
             if wdg is not None:
                 wdg.setFixedWidth(wd)
+        # 页脚提示按可用宽度切换长短，避免单行文字放不下（单行标签不会换行）
+        if hasattr(self, "tip"):
+            if w < 1420:
+                self.tip.setFixedWidth(196)
+                self.tip.label().setText("Space 继续 · Ctrl+S 保存")
+            elif w < 1700:
+                self.tip.setFixedWidth(246)
+                self.tip.label().setText("Space 继续 · Ctrl+S 保存 · Ctrl+E 导出")
+            else:
+                self.tip.setFixedWidth(300)
+                self.tip.label().setText("Space 继续 · Ctrl+S 保存 · Ctrl+E 导出 · ⇧E 出 Word")
         if narrow != getattr(self, "_narrow", None):
             self._narrow = narrow
             self._refresh_doc()                 # 元信息文案随宽度切换，避免换行被截
@@ -1796,6 +2955,33 @@ class StudioWindow(CMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._apply_responsive()
+
+    def _change_theme(self):
+        """CMainWindow 会在主题/调色板变化时重写全局 `QWidget{…}`，
+        这里立刻收回作用域，否则子容器又会被涂上底色方块。"""
+        super()._change_theme()
+        self._apply_root_bg()
+
+    def _apply_root_bg(self):
+        """把窗口底色限定在顶层自身。
+
+        PyCt6 的 setWindowBackground 会写 `QWidget { background-color: … }`，
+        该规则会命中**所有**子控件，于是标题块、行容器等会在三维卡片上留下一个个
+        浅色方块。这里改成只命中顶层（#studioRoot），子控件一律透明。
+        """
+        self.setObjectName("studioRoot")
+        self.setStyleSheet(f"QWidget#studioRoot {{ background-color: {C('bg')}; }}")
+        # 纯容器一律不画样式表底色：PyCt6 的全局规则会给它们带上 WA_StyledBackground，
+        # 于是在三维卡片上留下一块块浅色方块（标题块、按钮行等）。
+        for w in self.findChildren(QtWidgets.QWidget):
+            if type(w) is QtWidgets.QWidget:
+                w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+    def paintEvent(self, event):
+        """页面底衬：中心亮、边缘暗的径向渐变，给整个界面一层纵深。"""
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        draw_backdrop(p, QRectF(self.rect()))
 
     def _idle_hint(self) -> str:
         """空闲时左下角显示的小字提示。"""
@@ -1980,6 +3166,7 @@ def main(argv):
     set_color_theme(THEME_PATH)
     set_appearance_mode("light")     # 默认浅色，深色为亮橙科技配色
     app.setWindowIcon(QtGui.QIcon(ICON_PATH))     # 任务栏 / Alt-Tab 图标
+    install_button_skin()            # 给按钮套立体皮肤（渐变面 + 上亮下暗倒角）
 
     splash = None
     if SHOW_SPLASH and not any(a in argv for a in ("--shot", "--e2e", "--demo")):

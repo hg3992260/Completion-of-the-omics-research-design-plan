@@ -196,17 +196,22 @@ class LLMClient:
 
     # -- 对话 ---------------------------------------------------------------
     def chat(self, messages: list[dict], stream: bool = False, on_delta=None,
-             temperature: float | None = None, max_tokens: int | None = None) -> dict:
+             temperature: float | None = None, max_tokens: int | None = None,
+             reason: bool = False) -> dict:
         """返回 {content, reasoning, usage, model, elapsed, finish_reason, retried}。
 
+        reason=True 走**推理模式**：温度降到 0（让推理可复现）、把 token 预算抬到至少 12000
+        （思考 token 也算在预算内），并保留 reasoning_content 供界面展示推理过程。
         推理模型有时会把整个 token 预算花在思考上，导致正文为空（finish_reason=length）。
         这里自动加倍预算重试一次，并提示直接给结论。
         """
+        base_temp = self.cfg.get("temperature", 0.4) if temperature is None else temperature
+        base_budget = self.cfg.get("max_tokens", 8000) if max_tokens is None else max_tokens
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.cfg.get("temperature", 0.4) if temperature is None else temperature,
-            "max_tokens": self.cfg.get("max_tokens", 8000) if max_tokens is None else max_tokens,
+            "temperature": 0.0 if reason else base_temp,
+            "max_tokens": max(int(base_budget), 12000) if reason else int(base_budget),
             "stream": bool(stream),
         }
         t0 = time.time()

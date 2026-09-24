@@ -28,6 +28,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from app_paths import APP_VERSION  # noqa: E402
 import sys
 import threading
 import time
@@ -52,7 +54,7 @@ def client() -> LLMClient:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PCL-Radiomics-LLM/1.0"
+    server_version = f"PCL-Radiomics-LLM/{APP_VERSION}"
     protocol_version = "HTTP/1.1"
 
     # ------------------------------------------------------------------ 工具

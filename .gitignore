@@ -36,3 +36,15 @@ desktop.ini
 
 # Windows 本地快捷方式（指向本机绝对路径，对别人无意义）
 *.lnk
+
+# 本地材料与派生物（第三方 PDF 及其全文抽取，不入库；仅保留我们自己的整理成果）
+helm-main/
+docs/*.pdf
+docs/_extract/
+docs/parse/*.jsonl
+docs/parse/*.txt
+
+# 测试临时目录与错误输出
+_*test/
+_*test_dir/
+*.err

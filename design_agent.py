@@ -166,6 +166,9 @@ class Project:
     updated: str = field(default_factory=_now)
     path_: str = ""
     stages: dict = field(default_factory=dict)
+    shape: dict = field(default_factory=dict)
+    stat: dict = field(default_factory=dict)
+    convergence: dict = field(default_factory=dict)
     transcript: list = field(default_factory=list)
     final_doc: str = ""
 
@@ -223,6 +226,9 @@ class Project:
             st = blank_stage_state()
             st.update(v or {})
             p.stages[k] = st
+        p.shape = d.get("shape") or {}
+        p.stat = d.get("stat") or {}
+        p.convergence = d.get("convergence") or {}
         return p
 
     @classmethod
@@ -238,11 +244,17 @@ class Project:
     def to_dict(self) -> dict:
         return {"name": self.name, "raw_design": self.raw_design, "model": self.model,
                 "created": self.created, "updated": self.updated, "stages": self.stages,
+                "shape": self.shape,
+                "stat": self.stat,
+                "convergence": self.convergence,
                 "transcript": self.transcript[-60:], "final_doc": self.final_doc}
 
     def save(self, path: str | None = None) -> str:
         if path:
             self.path_ = path
+        if not self.path_:
+            # 没有路径时确定一个并记住它，否则每次保存都会新建一份副本
+            self.path_ = self.unique_path(self.name)
         self.updated = _now()
         json.dump(self.to_dict(), open(self.path, "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
@@ -283,20 +295,26 @@ class Project:
         return [m["name"] for m in cls.list_all()]
 
     def rename(self, new_name: str) -> str:
-        """改名并同步移动文件；返回新的文件路径。"""
+        """改名并同步移动文件；返回新的文件路径。
+
+        重名时文件会带 (2) 之类的后缀，**显示名同步采用该后缀**，
+        否则下拉框里会出现两个同名项目、无法分辨。
+        """
         new_name = (new_name or "").strip()
         if not new_name or new_name == self.name:
             return self.path
         old = self.path
-        self.name = new_name
-        new_path = self.unique_path(new_name, keep=old)
-        self.save(new_path)
-        if os.path.abspath(old) != os.path.abspath(new_path) and os.path.exists(old):
+        # 先按旧路径生成唯一新路径（keep=old 表示允许覆盖自己的旧文件）
+        probe = self.unique_path(new_name, keep=old)
+        base = os.path.splitext(os.path.basename(probe))[0]
+        self.name = base
+        self.save(probe)
+        if os.path.abspath(old) != os.path.abspath(probe) and os.path.exists(old):
             try:
                 os.remove(old)
             except OSError:
                 pass
-        return new_path
+        return probe
 
     def duplicate(self, new_name: str = "") -> "Project":
         copy = Project.from_dict(self.to_dict())
@@ -466,6 +484,92 @@ class DesignAgent:
                 "【投稿前自查】按 CLEAR / TRIPOD+AI / METRICS 要点列出 5-8 条自查项。"},
         ]
 
+    # -- scope 页（Statistic / SCI Shape）的引导式对话 -----------------------
+    SCOPE_ROLE = {
+        "stat": "统计方法学教练：熟悉诊断/预后研究的统计分析方案（SAP）、功效分析、前提诊断与"
+                "多重比较校正，也熟悉 CLEAR / METRICS / TRIPOD+AI 对统计报告的要求。",
+        "shape": "SCI 论文写作教练：熟悉 Glasman-Deal《Science Research Writing》的七章通用模型、"
+                 "时态与内容边界，按目标期刊惯例把控每一章的成稿。",
+    }
+
+    def _scope_brief(self, page: str, sec: dict) -> str:
+        """把该环节的规范内容整段喂给模型 —— 引导必须"基于内容"。"""
+        L = [f"【本环节】{sec.get('title', '')}（{sec.get('spec', '')}）"]
+        if sec.get("desc"):
+            L.append(f"环节定位：{sec['desc']}")
+        if sec.get("goal"):
+            L.append("本环节要点：\n" + "\n".join("  · " + str(x) for x in sec["goal"]))
+        if sec.get("model"):
+            L.append("通用模型组件（按顺序）：\n" + "\n".join(
+                f"  {i}. {m.get('en', '')} — {m.get('zh', '')}"
+                for i, m in enumerate(sec["model"], 1)))
+        if sec.get("must"):
+            L.append("必须写到：\n" + "\n".join("  ✓ " + str(x) for x in sec["must"]))
+        if sec.get("must_not"):
+            L.append("不得出现：\n" + "\n".join("  ✕ " + str(x) for x in sec["must_not"]))
+        if sec.get("language"):
+            L.append("语言与时态规则：\n" + "\n".join(
+                f"  · {r['rule']}（{r.get('page', '')}）" for r in sec["language"]))
+        if sec.get("example"):
+            L.append("示例化表述：" + str(sec["example"]).replace("\n", " / "))
+        if sec.get("formula"):
+            L.append("公式与参数：" + " ；".join(str(x) for x in sec["formula"]))
+        if sec.get("pitfalls"):
+            L.append("常见陷阱：\n" + "\n".join("  ✕ " + str(x) for x in sec["pitfalls"]))
+        if sec.get("output"):
+            L.append("本环节应产出：" + "；".join(str(x) for x in sec["output"]))
+        L.append("自检清单（回答与定稿都要对着它）：\n" + "\n".join(
+            f"  {i}. {c}" for i, c in enumerate(sec.get("checks", []), 1)))
+        if sec.get("note"):
+            L.append("补充说明：" + str(sec["note"]))
+        return "\n".join(L)
+
+    def _scope_context(self, page: str, sec: dict) -> str:
+        """把项目的**全部已有内容**交给模型，让它自己判断哪些与本环节相关
+        （代码不再指定"这一环节该看哪几条"）。"""
+        import coupling
+        return (coupling.project_digest(self.project) +
+                "\n\n上面是本项目的全部素材。请自行判断其中哪些与本环节相关，"
+                "并在提问与定稿中只引用真正相关的内容；若某类素材缺失，"
+                "请按常规做法给出建议值并标注需要研究者确认的地方。")
+
+    def scope_ask_messages(self, page: str, sec: dict) -> list[dict]:
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT + "\n\n本次角色：" + self.SCOPE_ROLE[page]},
+            {"role": "user", "content":
+                self._scope_context(page, sec) + "\n\n" + self._scope_brief(page, sec) + "\n\n"
+                "请针对**本环节**输出三节（全部为最终结论，不要输出你的思考过程）：\n"
+                "【现状评估】2-4 句：对照本环节的要点与自检清单，指出本项目当前内容的具体缺口，"
+                "必须引用上面已有的实际内容，不要泛泛而谈。\n"
+                "【必须澄清的问题】2-4 条，每条格式：问题？｜为什么问：一句话。"
+                "问题要能直接决定本环节的参数取值或措辞选择。\n"
+                "【本环节小结】一句话说明回答这些问题后能补齐什么。"},
+        ]
+
+    def scope_rewrite_messages(self, page: str, sec: dict) -> list[dict]:
+        store = (self.project.stat if page == "stat" else self.project.shape) or {}
+        node = store.get(sec["key"]) or {}
+        qa = []
+        for i, q in enumerate(node.get("questions", [])):
+            a = node["answers"][i] if i < len(node.get("answers", [])) else ""
+            qa.append(f"问：{q}\n答：{a or '（未回答，请按常规做法给出建议值并标注待确认）'}")
+        target = ("可直接放进统计分析方案（SAP）的段落：含具体检验、参数、判定标准与执行方式"
+                  if page == "stat" else
+                  "该章节的成稿文字：按上面通用模型组件的顺序组织，300-600 字，"
+                  "时态与内容边界遵守上面列的规则")
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT + "\n\n本次角色：" + self.SCOPE_ROLE[page]},
+            {"role": "user", "content":
+                self._scope_context(page, sec) + "\n\n" + self._scope_brief(page, sec) +
+                "\n\n【追问与回答】\n" + "\n".join(qa) + "\n\n"
+                "请输出四节：\n"
+                f"【定稿】小标题下一行直接开始正文（不要写“建议文字”，不要复述要求）。{target}。\n"
+                "【检查表】逐条判断上面的自检清单是否已被你的定稿满足，格式严格为："
+                "`- [x] 编号` 或 `- [ ] 编号`，编号即自检清单序号，覆盖清单全部条目。\n"
+                "【风险提示】1-3 条本环节最容易翻车的点。\n"
+                "【下一步】一句话指向下一个环节。"},
+        ]
+
     # -- 调用 ---------------------------------------------------------------
     def run(self, messages: list[dict], on_delta=None) -> dict:
         return self.client.chat(messages, stream=on_delta is not None, on_delta=on_delta)
@@ -475,6 +579,79 @@ class DesignAgent:
                                         "meta": meta, "ts": time.strftime("%H:%M:%S")})
         if len(self.project.transcript) > 60:
             self.project.transcript = self.project.transcript[-60:]
+
+
+    # -- 收敛推理（总览页：由模型判断收敛关系，代码不做任何映射）--------------
+    def convergence_messages(self) -> list[dict]:
+        """把项目全部内容原样交给模型，由它自行推断「该收敛到哪一章、还缺什么」。
+        代码里不存在章节与阶段/统计的对应表 —— 判断与理由都由模型给出。"""
+        import coupling
+        return [
+            {"role": "system", "content":
+                SYSTEM_PROMPT + "\n\n本次角色：投稿可行性评审。你要**自行推断**这些素材"
+                "分别支撑论文的哪一章，并指出还缺什么；不存在任何预设的对应关系，"
+                "你的判断依据必须写清楚。"},
+            {"role": "user", "content":
+                coupling.project_digest(self.project) + "\n\n"
+                "请通读上面全部素材，自行判断它们的归属与完整度，并严格按下面的格式输出：\n"
+                "【收敛总览】2-3 句：这份稿件现在收敛到什么程度、最大瓶颈是什么。\n"
+                "【本章来源对照】一句话说清你依据什么判断归属（例如按内容主题、按变量与终点、"
+                "按时间窗等），不要复述格式要求。\n"
+                "【各章收敛】对 Title、Abstract、Introduction、Methods、Results、Discussion、"
+                "Conclusion 依次输出一节，每节严格为：\n"
+                "### 英文章节名\n"
+                "来源：<支撑这一章的素材来自上面哪些条目，用分号分隔；没有就写 无>\n"
+                "已有：<这一章现在能写出什么实质内容，100 字内>\n"
+                "缺失：<还缺什么才能动笔，用分号分隔；没有就写 无>\n"
+                "就绪度：<0 到 100 的整数>\n"
+                "理由：<为什么这样判断，一句话>\n"
+                "【下一批动作】3-5 条，按优先级排序，每条一行，直接写要做的事。"},
+        ]
+
+
+def parse_convergence(text: str) -> dict:
+    """解析收敛推理结果 → {overall, basis, chapters:[{title, sources, have, missing,
+    readiness, reason}], actions:[...]}。格式不完整时尽力而为，不抛异常。"""
+    sec = parse_sections(text or "")
+    out = {"overall": pick(sec, "收敛总览"),
+           "basis": pick(sec, "本章来源对照", "来源对照"),
+           "chapters": [], "actions": []}
+    body = pick(sec, "各章收敛", "收敛")
+    cur = None
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if cur:
+                out["chapters"].append(cur)
+            cur = {"title": line.lstrip("#").strip(), "sources": "", "have": "",
+                   "missing": "", "readiness": None, "reason": ""}
+            continue
+        if cur is None:
+            continue
+        m = re.match(r"^(来源|已有|缺失|就绪度|理由)\s*[:：]\s*(.*)$", line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if key == "来源":
+            cur["sources"] = val
+        elif key == "已有":
+            cur["have"] = val
+        elif key == "缺失":
+            cur["missing"] = val
+        elif key == "理由":
+            cur["reason"] = val
+        else:
+            num = re.search(r"\d{1,3}", val)
+            cur["readiness"] = min(100, int(num.group(0))) if num else None
+    if cur:
+        out["chapters"].append(cur)
+    for raw in (pick(sec, "下一批动作", "下一步动作", "下一步") or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*·]|\d+[.、)])\s*", "", raw).strip()
+        if line:
+            out["actions"].append(line)
+    return out
 
 
 if __name__ == "__main__":                                        # 离线自检

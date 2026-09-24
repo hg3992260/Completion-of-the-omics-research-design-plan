@@ -14,7 +14,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from PyCt6 import CLabel, ModeManager
+from PyCt6 import CLabel, CButton, ModeManager
 
 if sys.platform == "darwin":                     # macOS：中文用苹方，等宽用 Menlo
     UI_FONT = "PingFang SC"
@@ -53,6 +53,34 @@ PAL = {
     "btn_hover":    ("#E2EEFC", "#2E3038"),
     "danger":       ("#C2410C", "#FF6B5C"),
     "danger_bg":    ("#FDF1EF", "#2A1A18"),
+
+    # ---- 拟物化三维用色阶（浅色 / 深色）----
+    # 卡片受光面与背光面（竖向渐变的上下端）
+    "surf_hi":      ("#FFFFFF", "#23252B"),
+    "surf_lo":      ("#EEF4FB", "#16171C"),
+    # 倒角：上缘高光、下缘暗边
+    "bevel_hi":     ("#FFFFFF", "#3A3D46"),
+    "bevel_lo":     ("#C2D4E8", "#0C0D10"),
+    # 投影（画在控件自身矩形内，不会越界）
+    "shadow":       ("#93AECB", "#000000"),
+    # 凹槽/内嵌件：上缘暗、下缘亮
+    "groove_hi":    ("#BCD0E4", "#0B0C0F"),
+    "groove_lo":    ("#FFFFFF", "#33363E"),
+    # 凸起件（键帽/旋钮）的受光与背光
+    "knob_hi":      ("#FFFFFF", "#31343C"),
+    "knob_lo":      ("#DEE9F5", "#1A1C21"),
+    # 强调色的亮/暗两端（用于渐变）
+    "accent_hi":    ("#37A0DD", "#FFA45C"),
+    "accent_lo":    ("#0A6BA6", "#D95F14"),
+    "ok_hi":        ("#2FBF88", "#54E6A5"),
+    "ok_lo":        ("#0B7C54", "#24A874"),
+    "warn_hi":      ("#D9903A", "#FFD166"),
+    "warn_lo":      ("#9A6415", "#D69B14"),
+    "bad_hi":       ("#E0603F", "#FF8478"),
+    "bad_lo":       ("#A83A22", "#C6473A"),
+    # 页面底衬（径向渐变的中心与边缘）
+    "back_hi":      ("#F7FBFF", "#1A1C22"),
+    "back_lo":      ("#DFE9F5", "#0B0C0F"),
 }
 
 
@@ -70,7 +98,7 @@ def C(key: str) -> str:
 def status_key(status: str) -> str:
     return {"达标": "ok", "部分": "warn", "缺失": "bad",
             "done": "ok", "drafted": "accent", "asked": "warn",
-            "todo": "muted", "运行中": "accent"}.get(status, "muted")
+            "doing": "warn", "todo": "muted", "运行中": "accent"}.get(status, "muted")
 
 
 def clear_layout(layout):
@@ -108,12 +136,23 @@ class RefitLabel(CLabel):
         text = inner.text() or ""
         if not text:
             return
-        w = self.width() if self.width() > 40 else self._basis
-        need = text_height(text, self._font_size, max(40, w - 12),
+        # 用**内层文字区**的实际宽度估算（外层 CLabel 比文字区宽约 10px，
+        # 用外层宽度会在临界换行处低估一行，导致文字被压/被截）
+        if inner.width() > 40:
+            w = inner.width()
+        elif self.width() > 40:
+            w = self.width() - 12
+        else:
+            w = self._basis
+        need = text_height(text, self._font_size, max(40, w - 4),
                            self._font_style == "bold")
         if abs(inner.height() - need) > 1:
             inner.setFixedHeight(need)
             self.setFixedHeight(need + 10)
+
+    def fit_now(self):
+        """立即按当前实际宽度重算高度（用于批量重建内容后强制对齐）。"""
+        self._refit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -158,17 +197,397 @@ class ProgressBar(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        """内嵌凹槽 + 渐变进度 + 上缘高光，做出"液体在槽里"的立体感。"""
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        r = QRectF(0, 0, self.width(), self.height())
+        h = self.height()
+        r = QRectF(0, 0, self.width(), h)
+        rad = h / 2
+        # 凹槽底色（上暗下亮 = 内嵌）
         p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QtGui.QColor(C("groove_hi")))
+        p.drawRoundedRect(r, rad, rad)
         p.setBrush(QtGui.QColor(C("track")))
-        p.drawRoundedRect(r, self.height() / 2, self.height() / 2)
+        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), rad, rad)
         if self._value > 0:
-            w = max(self.height(), self.width() * self._value)
-            p.setBrush(QtGui.QColor(C("accent")))
-            p.drawRoundedRect(QRectF(0, 0, w, self.height()),
-                              self.height() / 2, self.height() / 2)
+            w = max(h, self.width() * self._value)
+            fr = QRectF(1, 1, w - 2, h - 2)
+            grad = QtGui.QLinearGradient(fr.topLeft(), fr.bottomLeft())
+            grad.setColorAt(0.0, QtGui.QColor(C("accent_hi")))
+            grad.setColorAt(1.0, QtGui.QColor(C("accent_lo")))
+            p.setBrush(QtGui.QBrush(grad))
+            p.drawRoundedRect(fr, rad, rad)
+            # 玻璃高光：上半透明亮条
+            gloss = QRectF(fr.left() + 2, fr.top() + 1.2, max(0.0, fr.width() - 4), h * 0.30)
+            hl = QtGui.QColor("#FFFFFF")
+            hl.setAlpha(70 if ModeManager.mode != "dark" else 40)
+            p.setBrush(hl)
+            p.drawRoundedRect(gloss, gloss.height() / 2, gloss.height() / 2)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_lo")), 1))
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+
+
+# --------------------------------------------------------------------------- 三维构件
+
+CARD_PAD = 9          # 投影预留边距：阴影只画在控件自身矩形内，绝不越界遮挡邻居
+
+
+class CheckBox3D(QtWidgets.QWidget):
+    """三维勾选框：未选为凹陷空槽，选中为凸起绿钮 + 白色对勾。"""
+
+    toggled = Signal(bool)
+
+    def __init__(self, master, checked: bool = False, size: int = 16):
+        super().__init__(master)
+        self._checked = bool(checked)
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, on: bool):
+        on = bool(on)
+        if on != self._checked:
+            self._checked = on
+            self.update()
+            self.toggled.emit(on)
+
+    def mousePressEvent(self, event):
+        self.setChecked(not self._checked)
+        event.accept()
+
+    def _change_theme(self):
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        if self._checked:
+            p.setPen(QtGui.QPen(QtGui.QColor(C("ok_lo")), 1.0))
+            p.setBrush(pair_brush("ok_hi", "ok_lo", r))
+            p.drawRoundedRect(r, 4, 4)
+            hl = QtGui.QColor("#FFFFFF")
+            hl.setAlpha(90)
+            p.setPen(QtGui.QPen(hl, 1.0))
+            p.drawLine(QtCore.QPointF(r.left() + 3, r.top() + 1.4),
+                       QtCore.QPointF(r.right() - 3, r.top() + 1.4))
+            pen = QtGui.QPen(QtGui.QColor("#FFFFFF"), 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            w, h = r.width(), r.height()
+            path = QtGui.QPainterPath()
+            path.moveTo(r.left() + w * 0.26, r.top() + h * 0.52)
+            path.lineTo(r.left() + w * 0.44, r.top() + h * 0.71)
+            path.lineTo(r.left() + w * 0.75, r.top() + h * 0.31)
+            p.drawPath(path)
+        else:
+            # 凹陷：上暗下亮 + 内阴影线
+            p.setPen(QtGui.QPen(QtGui.QColor(C("groove_hi")), 1.0))
+            p.setBrush(pair_brush("surf_lo", "surf_hi", r))
+            p.drawRoundedRect(r, 4, 4)
+            sh = QtGui.QColor(C("groove_hi"))
+            sh.setAlpha(120)
+            p.setPen(QtGui.QPen(sh, 1.2))
+            p.drawLine(QtCore.QPointF(r.left() + 2.5, r.top() + 1.6),
+                       QtCore.QPointF(r.right() - 2.5, r.top() + 1.6))
+
+
+def pair_brush(hi_key: str, lo_key: str, rect: QRectF) -> QtGui.QBrush:
+    g = QtGui.QLinearGradient(rect.topLeft(), rect.bottomLeft())
+    g.setColorAt(0.0, QtGui.QColor(C(hi_key)))
+    g.setColorAt(1.0, QtGui.QColor(C(lo_key)))
+    return QtGui.QBrush(g)
+
+
+def draw_backdrop(p: QtGui.QPainter, rect: QRectF):
+    """页面底衬：中心亮、边缘暗的径向渐变（给整个界面一个"被照亮"的纵深）。"""
+    g = QtGui.QRadialGradient(rect.center(), max(rect.width(), rect.height()) * 0.72)
+    g.setColorAt(0.0, QtGui.QColor(C("back_hi")))
+    g.setColorAt(1.0, QtGui.QColor(C("back_lo")))
+    p.fillRect(rect, QtGui.QBrush(g))
+
+
+class Card(QtWidgets.QFrame):
+    """拟物化三维卡片：柔和多层投影 + 竖向渐变面 + 上缘高光/下缘暗边 + 描边。
+
+    投影画在控件自身矩形内预留的 CARD_PAD 边距里，**不会越出控件边界**，
+    因此不可能遮挡相邻控件；内容边距已包含该预留量。
+    """
+
+    def __init__(self, master, *, radius: int = 14, pad: int = CARD_PAD,
+                 margin=(16, 14, 16, 14), spacing: int = 10, deep: bool = False,
+                 horizontal: bool = False, **kw):
+        super().__init__(master)
+        self._radius = radius
+        self._pad = pad
+        self._deep = deep                       # deep=True 投影更重（用于顶层容器）
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        lay = (QtWidgets.QHBoxLayout if horizontal else QtWidgets.QVBoxLayout)(self)
+        lay.setContentsMargins(pad + margin[0], pad + margin[1],
+                               pad + margin[2], pad + margin[3])
+        lay.setSpacing(spacing)
+        self._layout = lay
+
+    def layout(self):
+        return self._layout
+
+    def set_content_margins(self, left: int, top: int, right: int, bottom: int):
+        self._layout.setContentsMargins(self._pad + left, self._pad + top,
+                                        self._pad + right, self._pad + bottom)
+
+    def _change_theme(self):
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        body = QRectF(self.rect()).adjusted(self._pad, self._pad, -self._pad, -self._pad)
+        if body.width() <= 2 or body.height() <= 2:
+            return
+        # 1) 投影：多层递减，向下偏移，营造"悬浮"厚度
+        layers = ((3.0, 26), (1.8, 20), (0.9, 16)) if not self._deep else \
+                 ((5.0, 40), (3.0, 30), (1.4, 22))
+        p.setPen(Qt.PenStyle.NoPen)
+        for dy, alpha in layers:
+            col = QtGui.QColor(C("shadow"))
+            col.setAlpha(alpha if ModeManager.mode != "dark" else alpha + 30)
+            p.setBrush(col)
+            p.drawRoundedRect(body.adjusted(-1.5, dy - 1.5, 1.5, dy + 1.5),
+                              self._radius, self._radius)
+        # 2) 面：竖向渐变
+        p.setBrush(pair_brush("surf_hi", "surf_lo", body))
+        p.drawRoundedRect(body, self._radius, self._radius)
+        # 3) 上缘高光（沿圆角内缩的一条亮线）→ 受光倒角
+        hi = QtGui.QColor(C("bevel_hi"))
+        p.setPen(QtGui.QPen(hi, 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        arc = self._radius * 0.6
+        path = QtGui.QPainterPath()
+        path.moveTo(body.left() + arc, body.top() + 0.8)
+        path.lineTo(body.right() - arc, body.top() + 0.8)
+        p.drawPath(path)
+        # 4) 下缘暗边 → 背光倒角
+        p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_lo")), 1.2))
+        path2 = QtGui.QPainterPath()
+        path2.moveTo(body.left() + arc, body.bottom() - 0.8)
+        path2.lineTo(body.right() - arc, body.bottom() - 0.8)
+        p.drawPath(path2)
+        # 5) 描边
+        p.setPen(QtGui.QPen(QtGui.QColor(C("border")), 1.0))
+        p.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), self._radius, self._radius)
+
+
+class FlowStepper(QtWidgets.QWidget):
+    """三维流程步进条：把四个视图按**先后顺序**做成凹槽里的键帽。
+
+    - 已完成的步骤：绿色 ✓，键帽下沉；当前步骤：抬起 + 强调色渐变 + 投影；
+    - 步骤之间的连接段在完成后被强调色填充 → 一眼看出流程推进到哪；
+    - 全部绘制在自身矩形内，不产生越界遮挡。
+    """
+
+    stepClicked = Signal(int)                   # 点击某一步 → 跳到该视图
+
+    def __init__(self, master, steps, width=0, height=44):
+        super().__init__(master)
+        self.steps = list(steps)                # [{"title": "工作台", "sub": "设计"}, ...]
+        self.cur = 0
+        self.states = ["todo"] * len(self.steps)
+        self.hover = -1
+        self.setMouseTracking(True)
+        if width and width > 0:
+            self.setFixedSize(width, height)
+        else:                                   # 自适应宽度（放在流程条容器里铺满）
+            self.setMinimumWidth(120 * len(self.steps))
+            self.setFixedHeight(height)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    # -- 对外接口 --
+    def set_current(self, idx: int):
+        self.cur = max(0, min(len(self.steps) - 1, idx))
+        for i in range(len(self.steps)):
+            self.states[i] = "done" if i < self.cur else ("active" if i == self.cur else "todo")
+        self.update()
+
+    def set_badge(self, idx: int, text: str):
+        """在步骤下方挂一个角标（如进度 n/10）。"""
+        if 0 <= idx < len(self.steps):
+            self.steps[idx]["badge"] = text
+            self.update()
+
+    def _rect(self, i: int) -> QRectF:
+        n = len(self.steps)
+        gap = 14.0
+        w = (self.width() - gap * (n - 1)) / n
+        return QRectF(i * (w + gap), 0, w, self.height())
+
+    def _index_at(self, pos) -> int:
+        for i in range(len(self.steps)):
+            if self._rect(i).contains(pos):
+                return i
+        return -1
+
+    def mouseMoveEvent(self, e):
+        i = self._index_at(e.position())
+        if i != self.hover:
+            self.hover = i
+            self.update()
+
+    def leaveEvent(self, e):
+        self.hover = -1
+        self.update()
+
+    def mousePressEvent(self, e):
+        i = self._index_at(e.position())
+        if i >= 0:
+            self.stepClicked.emit(i)
+
+    def _change_theme(self):
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        f_t = QtGui.QFont(UI_FONT, 9)
+        f_t.setBold(True)
+        f_n = QtGui.QFont(MONO_FONT, 8)
+        f_n.setBold(True)
+        f_b = QtGui.QFont(UI_FONT, 7)
+        for i, st in enumerate(self.steps):
+            r = self._rect(i)
+            state = self.states[i]
+            active = state == "active"
+            done = state == "done"
+            rad = 9.0
+            # 键帽下方的投影（抬起感）
+            p.setPen(Qt.PenStyle.NoPen)
+            if active or self.hover == i:
+                col = QtGui.QColor(C("shadow"))
+                col.setAlpha(60 if active else 34)
+                p.setBrush(col)
+                p.drawRoundedRect(r.adjusted(0, 1.5, 0, 5.5), rad, rad)
+            # 键帽面
+            if active:
+                brush = pair_brush("accent_hi", "accent_lo", r)
+            elif done:
+                brush = pair_brush("surf_hi", "surf_lo", r)
+            else:
+                brush = pair_brush("knob_lo", "knob_lo", r)
+            p.setBrush(brush)
+            p.drawRoundedRect(r, rad, rad)
+            # 倒角：上亮下暗（按下/未到的步骤反过来 = 内嵌感）
+            if done or active:
+                p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_hi")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + rad * 0.6, r.top() + 0.8),
+                           QtCore.QPointF(r.right() - rad * 0.6, r.top() + 0.8))
+                p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_lo")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + rad * 0.6, r.bottom() - 0.8),
+                           QtCore.QPointF(r.right() - rad * 0.6, r.bottom() - 0.8))
+            else:
+                p.setPen(QtGui.QPen(QtGui.QColor(C("groove_hi")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + rad * 0.6, r.top() + 0.8),
+                           QtCore.QPointF(r.right() - rad * 0.6, r.top() + 0.8))
+                p.setPen(QtGui.QPen(QtGui.QColor(C("groove_lo")), 1.0))
+                p.drawLine(QtCore.QPointF(r.left() + rad * 0.6, r.bottom() - 0.8),
+                           QtCore.QPointF(r.right() - rad * 0.6, r.bottom() - 0.8))
+            p.setPen(QtGui.QPen(QtGui.QColor(C("border")), 1.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+            # 序号圆章（左） + 标题（右）
+            cx, cy = r.left() + 15, r.center().y()
+            p.setPen(Qt.PenStyle.NoPen)
+            badge_col = QtGui.QColor(C("ok_hi") if done else
+                                     (C("on_accent") if active else C("muted")))
+            if done:
+                p.setBrush(QtGui.QColor(C("ok_lo")))
+                p.drawEllipse(QtCore.QPointF(cx, cy), 8.5, 8.5)
+                p.setPen(QtGui.QPen(QtGui.QColor("#FFFFFF")))
+                p.setFont(f_n)
+                p.drawText(QRectF(cx - 8.5, cy - 8, 17, 16), Qt.AlignCenter, "✓")
+            else:
+                p.setBrush(QtGui.QColor(C("knob_hi") if active else C("surface")))
+                p.drawEllipse(QtCore.QPointF(cx, cy), 8.5, 8.5)
+                p.setPen(QtGui.QPen(QtGui.QColor(
+                    C("on_accent") if active else C("muted_dim")), 1.0))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(QtCore.QPointF(cx, cy), 8.5, 8.5)
+                p.setPen(QtGui.QPen(badge_col))
+                p.setFont(f_n)
+                p.drawText(QRectF(cx - 8.5, cy - 8, 17, 16), Qt.AlignCenter, str(i + 1))
+            tx = cx + 13
+            avail = r.right() - tx - 8
+            p.setPen(QtGui.QPen(QtGui.QColor(C("on_accent") if active else
+                                             (C("text") if done else C("muted")))))
+            p.setFont(f_t)
+            p.drawText(QRectF(tx, cy - 15, avail, 16),
+                       Qt.AlignLeft | Qt.AlignVCenter, st.get("title", ""))
+            p.setPen(QtGui.QPen(QtGui.QColor(C("on_accent") if active else C("muted_dim"))))
+            p.setFont(f_b)
+            p.drawText(QRectF(tx, cy + 0.5, avail, 13),
+                       Qt.AlignLeft | Qt.AlignVCenter, st.get("badge") or st.get("sub", ""))
+            # 连接段：完成后填充强调色，未完成留凹槽
+            if i < len(self.steps) - 1:
+                y = cy
+                seg = QRectF(r.right() + 2, y - 1.5, 10, 3)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QtGui.QColor(C("groove_hi")))
+                p.drawRoundedRect(seg, 1.5, 1.5)
+                if done:
+                    p.setBrush(QtGui.QColor(C("accent")))
+                    p.drawRoundedRect(seg, 1.5, 1.5)
+                # 箭头
+                ax = seg.right() + 1
+                tri = QtGui.QPolygonF([QtCore.QPointF(ax, y - 4),
+                                       QtCore.QPointF(ax + 4, y),
+                                       QtCore.QPointF(ax, y + 4)])
+                p.setBrush(QtGui.QColor(C("accent") if done else C("grid")))
+                p.drawPolygon(tri)
+
+
+def install_button_skin():
+    """给 PyCt6 的 CButton 套一层立体皮肤（渐变面 + 上亮下暗倒角）。
+
+    采用运行时包装而非修改第三方包：只在其自身 stylesheet 之后追加阴影/渐变，
+    失败时静默回退（不影响原样式）。
+    """
+
+    def qss(widget) -> str:
+        base = getattr(widget, "_background_color", None)
+        base = base[1] if (ModeManager.mode == "dark" and isinstance(base, tuple)) else \
+               (base[0] if isinstance(base, tuple) else base)
+        txt = getattr(widget, "_text_color", None)
+        txt = txt[1] if (ModeManager.mode == "dark" and isinstance(txt, tuple)) else \
+              (txt[0] if isinstance(txt, tuple) else txt)
+        rad = getattr(widget, "_corner_radius", 8)
+        hi = QtGui.QColor(C("bevel_hi")).name()
+        lo = QtGui.QColor(C("bevel_lo")).name()
+        return (
+            f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {base}, stop:0.52 {base}, stop:1 {lo});"
+            f" color: {txt}; border: 1px solid {lo}; border-top: 1px solid {hi};"
+            f" border-radius: {rad}px; padding: 3px 10px; }}"
+            f"QPushButton:hover {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {C('knob_hi')}, stop:1 {base}); }}"
+            f"QPushButton:pressed {{ background: {lo}; border-top: 1px solid {lo};"
+            f" border-bottom: 1px solid {hi}; padding-top: 4px; }}")
+
+    if getattr(CButton, "_dsh_skinned", False):
+        return
+    orig = CButton._change_theme
+
+    def patched(self):
+        orig(self)
+        try:
+            self.button().setStyleSheet(qss(self) + self.button().styleSheet())
+        except Exception:                                       # noqa: BLE001
+            pass
+
+    CButton._change_theme = patched
+    CButton._dsh_skinned = True
 
 
 class TranscriptView(QtWidgets.QTextEdit):

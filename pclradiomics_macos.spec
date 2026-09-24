@@ -9,7 +9,7 @@
 用法（macOS）：
     python -m PyInstaller --noconfirm --clean pclradiomics_macos.spec
     PCL_ARCH=universal2 python -m PyInstaller ... pclradiomics_macos.spec   # 通用二进制（若依赖有 universal2 轮子）
-    PCL_VERSION=1.2.0 python -m PyInstaller ... pclradiomics_macos.spec
+    PCL_VERSION=1.1.0 python -m PyInstaller ... pclradiomics_macos.spec
 
 macOS 与 Windows 的差异都在代码里处理好了：
     · 字体      ui_kit 在 darwin 上用 PingFang SC / Menlo
@@ -24,7 +24,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = os.path.abspath(os.getcwd())
 APP_NAME = "PCLRadiomics"
 APP_NAME_CN = "组学研究设计工作台"
-VERSION = os.environ.get("PCL_VERSION", "1.0.0")
+VERSION = os.environ.get("PCL_VERSION", "1.1.0")
 ARCH = os.environ.get("PCL_ARCH", "")            # 留空=本机架构；universal2 / x86_64 / arm64
 
 ASSETS = ["theme_tech.json", "logo_icon.ico", "logo_badge.png", "logo_banner.png",
