@@ -22,6 +22,7 @@ Windows 7 上连"内嵌浏览器"也走不通（WebView2 Runtime 109 是最后�
     GET  /api/health           健康检查
     GET  /api/state[?project=] 整份界面状态（项目列表 + 十阶段完整内容 + 三条工作线 + 九阶段/七章 + 收敛结论）
     GET  /api/scope?page=&key= 一个 scope 环节的完整内容（结构内容）+ 当前状态与自检勾选（引导完善）
+    GET  /api/stat/tools       统计计算层可用性（numpy/scipy 版本）+ 16 种检验/校正/样本量元数据
     GET  /api/export?fmt=md    导出 Markdown（无依赖）/ Word（需要 python-docx）→ 浏览器下载
     POST /api/project/new      新建空白项目
     POST /api/project/rename   项目改名
@@ -36,6 +37,8 @@ Windows 7 上连"内嵌浏览器"也走不通（WebView2 Runtime 109 是最后�
     POST /api/scope/rewrite    scope 定稿 + 自检判定（SSE 流式）
     POST /api/scope/answers    只保存 scope 回答
     POST /api/scope/save       保存 scope 编辑 / 勾选自检 / 采纳定稿（会自动按检查表勾选）
+    POST /api/stat/run         跑一次真实统计计算（describe / 16 种检验 / 效应量 / 样本量 / 多重比较校正）
+    POST /api/stat/apply       把计算结论写入本环节定稿或草稿；删除/清空计算记录
     POST /api/convergence      收敛推理（SSE 流式）
 
 所有会改数据或调用模型的接口，成功时都会在 ``done`` 事件里回传整份 ``state``，
@@ -72,6 +75,7 @@ import coupling                                                    # noqa: E402
 import scope_core                                                  # noqa: E402
 import shape_data                                                  # noqa: E402
 import stat_data                                                   # noqa: E402
+import stat_tools                                                  # noqa: E402
 from design_agent import (DesignAgent, Project, parse_checklist,    # noqa: E402
                           parse_convergence, parse_questions, parse_sections, pick)
 from llm_client import LLMClient, load_config, mask                 # noqa: E402
@@ -203,7 +207,8 @@ def scope_payload(page: str, key: str, project) -> dict:
                  "draft": node.get("draft", ""), "final": node.get("final", ""),
                  "risks": node.get("risks", ""), "checklist": node.get("checklist", ""),
                  "next": node.get("next", ""), "model": node.get("model", ""),
-                 "updated": node.get("updated", "")},
+                 "updated": node.get("updated", ""),
+                 "calc": list(node.get("calc") or [])},
     }
     out.update(extra)
     # 反查：模型认为本环节支撑哪些章（同样来自它自己写的来源引用）
@@ -267,6 +272,7 @@ def state_payload(sel: str, project=None) -> dict:
         "current": project.name if project else "",
         "current_file": os.path.basename(project.path_) if project else "",
         "llm": llm_info(),
+        "stat_tools": stat_tools.available(),
         "overview": None, "convergence": {},
     }
     if project is None:
@@ -436,6 +442,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"ok": False, "error": "没有可操作的项目"})
             page = q.get("page") if q.get("page") in ("stat", "shape") else "stat"
             return self._json(200, scope_payload(page, q.get("key") or "", project))
+        if path == "/api/stat/tools":                # 计算层可用性与 16 种检验元数据
+            return self._stat_tools()
         if path == "/api/export":
             return self._export()
         return self._json(404, {"ok": False, "error": "unknown path %s" % path})
@@ -485,6 +493,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._scope_answers()
         if path == "/api/scope/save":                # 存编辑 / 勾选自检 / 采纳定稿（JSON）
             return self._scope_save()
+        if path == "/api/stat/run":                  # 真实统计计算（JSON，不调模型）
+            return self._stat_run()
+        if path == "/api/stat/apply":                # 计算结果写入定稿 / 删除记录
+            return self._stat_apply()
         if path == "/api/convergence":               # 收敛推理（SSE）
             return self._convergence()
         return self._json(404, {"ok": False, "error": "unknown path %s" % path})
@@ -808,6 +820,147 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                                      # noqa: BLE001
             return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
         return self._json(200, {"ok": True, "sid": sid, "status": st["status"],
+                                "state": state_payload("", project)})
+
+    # -- 真实统计计算（stat_tools：numpy + scipy，不调模型）------------------
+    def _stat_tools(self):
+        return self._json(200, {
+            "ok": True, "available": stat_tools.available(),
+            "kinds": stat_tools.kinds_payload(),
+            "corrections": [{"key": k, "name": v}
+                            for k, v in stat_tools.CORRECTIONS.items()],
+            "sample_kinds": [{"key": "two_means", "name": "两组均数比较"},
+                             {"key": "two_props", "name": "两组比例比较"},
+                             {"key": "one_mean", "name": "单组均数与 μ₀ 比较"},
+                             {"key": "correlation", "name": "相关分析"}],
+        })
+
+    def _stat_target(self, body):
+        """定位计算结果要记到哪个 scope 环节（默认统计页里声明了 stat_run_test 的那个）。"""
+        project = resolve_project(body.get("project") or "")
+        if project is None:
+            return None, "stat", None, self._json(400, {"ok": False,
+                                                        "error": "没有可操作的项目"})
+        page = body.get("page") if body.get("page") in ("stat", "shape") else "stat"
+        data = stat_data.STAGES if page == "stat" else shape_data.SHAPE
+        sec = next((s for s in data if s["key"] == (body.get("key") or "")), None)
+        if sec is None:
+            sec = next((s for s in data
+                        if "stat_run_test" in (s.get("tools") or [])), data[0])
+        return project, page, sec, None
+
+    @staticmethod
+    def _fnum(body, key, default=0.0):
+        v = body.get(key)
+        if v is None or v == "":
+            return float(default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            raise stat_tools.StatError("%s 需要数字（当前 %r）" % (key, v))
+
+    def _stat_run(self):
+        body = self._body()
+        project, page, sec, err = self._stat_target(body)
+        if err is not None:
+            return err
+        action = (body.get("action") or "test").strip()
+        alpha = self._fnum(body, "alpha", 0.05)
+        try:
+            if action == "describe":
+                res = stat_tools.stat_describe(body.get("groups"), body.get("labels"))
+            elif action == "test":
+                res = stat_tools.stat_run_test(
+                    body.get("kind") or "welch", groups=body.get("groups"),
+                    x=body.get("x"), y=body.get("y"), mu=self._fnum(body, "mu", 0.0),
+                    table=body.get("table"), successes=body.get("successes"),
+                    trials=body.get("trials"), p0=self._fnum(body, "p0", 0.5), alpha=alpha)
+            elif action == "effect":
+                res = stat_tools.stat_effect_ci(
+                    body.get("kind") or "welch", groups=body.get("groups"),
+                    x=body.get("x"), y=body.get("y"), table=body.get("table"), alpha=alpha)
+            elif action == "sample_size":
+                res = stat_tools.stat_sample_size(
+                    body.get("kind") or "two_means", alpha=alpha,
+                    power=self._fnum(body, "power", 0.80),
+                    d=(None if body.get("d") in (None, "") else self._fnum(body, "d")),
+                    sd=(None if body.get("sd") in (None, "") else self._fnum(body, "sd")),
+                    delta=(None if body.get("delta") in (None, "")
+                           else self._fnum(body, "delta")),
+                    p1=(None if body.get("p1") in (None, "") else self._fnum(body, "p1")),
+                    p2=(None if body.get("p2") in (None, "") else self._fnum(body, "p2")),
+                    r=(None if body.get("r") in (None, "") else self._fnum(body, "r")))
+            elif action == "correct":
+                res = stat_tools.stat_correct_pvalues(body.get("pvals"),
+                                                      body.get("method") or "fdr_bh",
+                                                      alpha=alpha)
+            else:
+                raise stat_tools.StatError("未知的计算动作：%s" % action)
+        except stat_tools.StatError as e:
+            return self._json(400, {"ok": False, "error": str(e),
+                                    "available": stat_tools.available()})
+        except Exception as e:                                      # noqa: BLE001
+            return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+
+        record, saved, serr = None, True, ""
+        if body.get("save", True) is not False:
+            store = project.stat if page == "stat" else project.shape
+            node = scope_core.node(store, sec["key"])
+            record = {"action": action,
+                      "kind": res.get("kind", action),
+                      "name": res.get("name") or res.get("method_name") or action,
+                      "sentence": res.get("sentence") or res.get("text", ""),
+                      "result": res, "ts": time.strftime("%Y-%m-%d %H:%M")}
+            node.setdefault("calc", []).append(record)
+            node["updated"] = time.strftime("%H:%M")
+            try:
+                project.save()
+            except Exception as e:                                  # noqa: BLE001
+                saved, serr = False, "%s: %s" % (type(e).__name__, e)
+        return self._json(200, {"ok": True, "result": res, "record": record,
+                                "saved": saved, "save_error": serr, "page": page,
+                                "scope": scope_payload(page, sec["key"], project),
+                                "state": state_payload("", project)})
+
+    def _stat_apply(self):
+        """把计算结论写进本环节的定稿/草稿，或删除一条计算记录。"""
+        body = self._body()
+        project, page, sec, err = self._stat_target(body)
+        if err is not None:
+            return err
+        store = project.stat if page == "stat" else project.shape
+        node = scope_core.node(store, sec["key"])
+        calc = list(node.get("calc") or [])
+        if body.get("clear"):
+            node["calc"] = calc = []
+        elif body.get("remove") is not None:
+            try:
+                calc.pop(int(body["remove"]))
+                node["calc"] = calc
+            except (IndexError, TypeError, ValueError):
+                return self._json(400, {"ok": False, "error": "要删除的记录不存在"})
+        else:
+            text = body.get("text") or ""
+            if not text and body.get("index") is not None:
+                try:
+                    text = calc[int(body["index"])].get("sentence") or ""
+                except (IndexError, TypeError, ValueError):
+                    text = ""
+            if not text.strip():
+                return self._json(400, {"ok": False,
+                                        "error": "没有可写入的结论（先运行一次计算）"})
+            target = body.get("target") if body.get("target") in ("draft", "final") else "draft"
+            cur = (node.get(target) or "").strip()
+            node[target] = (cur + "\n" if cur else "") + text.strip()
+            if target == "final":
+                node["status"] = "done"
+        node["updated"] = time.strftime("%H:%M")
+        try:
+            project.save()
+        except Exception as e:                                      # noqa: BLE001
+            return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+        return self._json(200, {"ok": True, "page": page,
+                                "scope": scope_payload(page, sec["key"], project),
                                 "state": state_payload("", project)})
 
     # -- scope 环节（统计九阶段 / SCI 七章）----------------------------------

@@ -53,6 +53,10 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 是 UA 样式里最弱的一条：任何 display:flex/grid 都会把它盖掉。
+   这里统一兜底，避免"该隐藏的块照旧显示"（这个坑已经栽过两次）。 */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -594,6 +598,34 @@ code { font: 12px Consolas, "Courier New", monospace; padding: 1px 5px; border-r
 .ckitem.sug .num { color: var(--accent); }
 
 .empty { padding: 12px; font-size: 12.5px; color: var(--ink-mute); }
+
+/* ------------------------------------------------------ 真实计算面板 */
+.sel, .num {
+  font: inherit; font-size: 12.5px; padding: 5px 8px; border-radius: 8px;
+  color: var(--ink); background: var(--select); border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge);
+}
+.sel { min-width: 130px; }
+.num { width: 84px; }
+.calcbox { display: flex; flex-direction: column; gap: 8px; }
+.calcblock { display: flex; flex-direction: column; gap: 6px; }
+.calcblock .ta { min-height: 40px; }
+.calcresult { display: flex; flex-direction: column; gap: 8px; }
+.calcres { padding: 10px 12px; }
+.calcres .tbl { font-size: 12.5px; }
+.calcres .tbl td { padding: 4px 8px; }
+.oktxt { color: var(--ok); }
+.okbox { color: var(--ok); font-size: 12.5px; }
+.calctext { max-height: 160px; font-size: 12px; }
+.calcrow {
+  padding: 8px 10px; border-radius: 10px; margin-bottom: 6px;
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel-lo));
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge);
+}
+.calcrow .crhead { display: flex; align-items: baseline; gap: 8px; }
+.calcrow .crhead .meta { margin-left: auto; }
+.calcrow .crsent { font-size: 12.5px; color: var(--ink-dim); margin: 4px 0 6px; }
 
 /* ------------------------------------------- 收敛结论 ⇄ 页面/环节 的跳转 */
 .jump { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

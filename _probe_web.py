@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -280,7 +281,7 @@ AUTOTEST_JS = r"""
           });
         })();
       } else if (mode === 'scopeask' || mode === 'scoperewrite' || mode === 'scopeaccept'
-                 || mode === 'scopetick' || mode === 'chapback') {
+                 || mode === 'scopetick' || mode === 'chapback' || mode === 'calcrun') {
         // ---- scope 页（统计 / SCI）：page 由 URL 给出 ----
         var page = new URLSearchParams(location.search).get('page') || 'stat';
         var key = new URLSearchParams(location.search).get('key') || '';
@@ -372,6 +373,41 @@ AUTOTEST_JS = r"""
               ok('chapter=' + chap + ' cards=' +
                  document.querySelectorAll('#convChapters .chap').length);
             });
+        } else if (mode === 'calcrun') {         // 真实计算：填入两组数据 → 运行 → 写入定稿
+          var gs = document.querySelectorAll('.calcg');
+          if (gs.length < 2) { return fail('没有渲染分组输入框'); }
+          if (!document.getElementById('calcKind') ||
+              document.getElementById('calcKind').options.length < 16) {
+            return fail('检验类型下拉框没有 16 项');
+          }
+          gs[0].value = '1 2 3 4 5 6 7 8 9 10';
+          gs[1].value = '3 4 5 6 7 8 9 10 11 12';
+          if (!click('#calcRun')) { return; }
+          waitFor(function () {
+            return !!document.querySelector('#calcResult .calcres');
+          }, function () {
+            var txt = document.getElementById('calcResult').textContent;
+            if (txt.indexOf('P') < 0) { return fail('结果卡片里没有 P 值'); }
+            click('#calcToDraft');
+            var n = 0;
+            (function pollC() {
+              fetch('/api/scope?page=stat&key=' + encodeURIComponent(key) +
+                    '&project=' + encodeURIComponent(proj))
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                  var node = d.node || {};
+                  var written = (node.draft || '').indexOf('差异') >= 0 ||
+                                (node.final || '').indexOf('差异') >= 0;
+                  if (written && ((node.calc || []).length >= 1)) {
+                    return ok('calc=' + node.calc.length + ' draft=' +
+                              (node.draft || '').length + ' 结论=' +
+                              (node.calc[0].kind || ''));
+                  }
+                  if (n++ > 80) { return fail('计算结论没有写进草稿'); }
+                  setTimeout(pollC, 50);
+                });
+            })();
+          });
         }
       } else {
         fail('unknown mode');
@@ -396,6 +432,28 @@ def make_autotest_dir():
     with open(p, "w", encoding="utf-8") as fh:
         fh.write(html)
     return dst
+
+
+def seed_calc(base):
+    """截图前先用真计算跑一次，让「计算记录」在截图里是真实产物而不是手写的假数据。"""
+    import urllib.request
+    payload = {"project": "", "page": "stat", "key": S6, "action": "test", "kind": "welch",
+               "groups": ["0.42 0.51 0.38 0.60 0.47 0.55 0.44 0.58 0.49 0.53",
+                          "0.61 0.72 0.58 0.80 0.66 0.75 0.63 0.77 0.69 0.71"],
+               "alpha": 0.05}
+    try:
+        req = urllib.request.Request(
+            base + "/api/stat/run", data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        res = d["result"]
+        print("  预置计算：%s  t=%s  P=%s" % (res.get("kind"), res.get("statistic"),
+                                            res.get("p")))
+        return True
+    except Exception as e:                                          # noqa: BLE001
+        print("  预置计算失败：%s: %s" % (type(e).__name__, e))
+        return False
 
 
 def find_chrome():
@@ -438,6 +496,8 @@ AUTOTEST_CASES = [
     ("worktick", "view=work&sid=3&autotest=worktick", "工作台检查表：点一下就落盘"),
     ("chapback", "view=stat&mode=guide&key=" + S1 + "&autotest=chapback&page=stat",
      "scope 环节 → 点「支撑的章节」回到总览并高亮"),
+    ("calcrun", "view=stat&mode=guide&key=" + S6 + "&autotest=calcrun&page=stat",
+     "真实计算：填两组数据 → 运行 → 结论写入草稿并留痕"),
 ]
 
 
@@ -605,7 +665,30 @@ def dom_checks(chrome, base):
     ck("scope 环节渲染出「模型认为本环节支撑」按钮",
        'data-goto-chapter=' in part(d9, "statBody", "statLive"),
        part(d9, "statBody", "statLive")[:200])
-    return bad, 35
+
+    # 真实计算面板：只在声明了计算工具的环节出现
+    d10 = part(dump_dom(chrome, base + "?view=stat&mode=guide&key=" + S6), "statBody",
+               "statLive")
+    ck("「检验计算」环节渲染出真实计算面板", 'id="calcAction"' in d10, d10[:200])
+    ck("面板给出该环节声明的计算动作（假设检验 + 多重比较校正）",
+       d10.count("<option value=\"test\"") == 1 and
+       d10.count("<option value=\"correct\"") == 1,
+       str(re.findall(r'<option value="(\w+)"', d10)[:8]))
+    n_kind = len(re.findall(r'<option value="(?:ttest_ind|welch|mannwhitney|ttest_paired|'
+                            r'wilcoxon|ttest_1samp|wilcoxon_1samp|anova|kruskal|levene|'
+                            r'pearson|spearman|kendall|chisq|fisher|binom_prop)"', d10))
+    ck("检验类型下拉框覆盖 16 种 kind", n_kind == 16, "选项=%s" % n_kind)
+    ck("显示计算层版本", "numpy" in d10 and "scipy" in d10)
+    blocks = re.findall(r'class="calcblock"[^>]*data-for="(\w+)"( hidden="")?', d10)
+    shown_b = [b for b, h in blocks if not h]
+    ck("只显示当前检验对应的输入块（其余隐藏）",
+       len(blocks) == 7 and shown_b == ["multi"],
+       "显示=%s 全部块=%s" % (shown_b, len(blocks)))
+    d11 = part(dump_dom(chrome, base + "?view=stat&mode=guide&key=" + S3), "statBody",
+               "statLive")
+    ck("未声明计算工具的环节不出现计算面板（第 3 阶段）",
+       'id="calcAction"' not in d11, d11[:160])
+    return bad, 41
 
 
 def main() -> int:
@@ -651,6 +734,8 @@ def main() -> int:
 
     shots = os.path.join(HERE, "_shots")
     os.makedirs(shots, exist_ok=True)
+    print("\n预置一次真实计算（让截图里的计算记录是真实产物）：")
+    seed_calc(base)
     bad = []
     for name, qs, w, h in CASES:
         out = os.path.join(shots, name + ".png")

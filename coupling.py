@@ -96,6 +96,10 @@ def project_digest(project, *, full_limit: int = 900) -> str:
                            f"→{_one_line(str(ans[i]) if i < len(ans) else '', 60)}"
                            for i, q in enumerate(node["questions"][:3]))
             line += "｜追问：" + qa
+        calc = node.get("calc") or []
+        if calc:                        # 真实算过的数字也算项目素材，交给模型引用
+            line += "｜本地计算结果：" + _one_line(
+                "；".join(str(c.get("sentence") or c.get("text") or "") for c in calc[-3:]), 400)
         L.append(line)
 
     L.append("\n【SCI 结构 · 七章】")

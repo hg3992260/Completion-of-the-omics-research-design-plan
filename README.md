@@ -19,15 +19,17 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 **当前版本：`v1.1.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
 
-> **开发中（未发布）**：**Web 版 Phase 0 / 1 / 2 + 互跳 + Win7 exe 打包** —— `web_server.py` + `web/`，
-> 本地服务 + 浏览器界面，让 Windows 7 也能用上完整界面（Qt 6 与 WebView2 都不支持 Win7）。
+> **开发中（未发布）**：**Web 版 Phase 0 / 1 / 2 + 互跳 + 真实统计计算 + Win7 exe 打包** ——
+> `web_server.py` + `web/`，本地服务 + 浏览器界面，让 Windows 7 也能用上完整界面
+> （Qt 6 与 WebView2 都不支持 Win7）。
 > Phase 0 打通四个视图与收敛推理；Phase 1 把**工作台**做成可编辑闭环
 > （研究设想 → 追问 → 回答 → 改写 → 采纳 → 汇总草案 → 导出 Markdown / Word，检查表可勾选）；
 > Phase 2 把**统计九阶段与 SCI 七章**做成「结构内容 ⇄ 引导完善」两模式
 > （追问 → 回答 → 定稿 → 采纳，采纳时按模型检查表**自动勾选自检项**，也可自己勾）；
 > 收敛结论与页面/环节之间**双向可点击跳转**；
-> 另外提供 `编译_Win7_Web版.bat`：用 Python 3.8 打一个 **Win7 上双击即用、不用装 Python** 的 exe。
-> 见「八、Web 版」。
+> 统计页接上**真实计算**（16 种检验 / 效应量 / 样本量 / 多重比较校正，numpy+scipy，结果可写进定稿）；
+> 另外提供 `编译_Win7_Web版.bat`：用 Python 3.8 打一个 **Win7 上双击即用、不用装 Python** 的 exe
+> （可选把计算层一起打进去）。见「八、Web 版」。
 
 ### v1.1.1 · Windows 7 支持说明 + 仅 API 构建
 
@@ -641,7 +643,8 @@ git push -u origin main
 | `web_server.py` | **Web 版内核**：纯标准库本地服务（Python 3.8 兼容），把项目 / 十阶段工作台 / 统计与 SCI 的 scope 引导 / 收敛推理 / 导出以 HTTP + SSE 暴露给浏览器；无 Qt 依赖 |
 | `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），四个视图（工作台 + 两个 scope 页可编辑）+ 流程条 + 流式输出；**无任何外链资源**，离线可用 |
 | `启动_Web版.bat` | Web 版一键启动：找 Python（3.8 起）→ 起服务 → 优先用 Chrome/Edge/Firefox 打开界面 |
-| `pclradiomics_web_win7.spec` / `编译_Win7_Web版.bat` | **Web 版打包成 exe**（Python 3.8，无 Qt）：产出文件夹版与单文件版，并显式带上 OpenSSL / libxml2 一族 DLL；构建后自动跑 PE 兼容检查与端到端自检 |
+| `pclradiomics_web_win7.spec` / `编译_Win7_Web版.bat` | **Web 版打包成 exe**（Python 3.8，无 Qt）：产出文件夹版与单文件版，并显式带上 OpenSSL / libxml2 一族 DLL；构建后自动跑 PE 兼容检查与端到端自检。加 `scipy` 参数则把 numpy/scipy 一起打进去（22 MB → 190 MB） |
+| `stat_tools.py` | **统计计算层**：16 种假设检验 + 描述统计/正态性/方差齐性 + 效应量与 CI + 样本量估算 + 多重比较校正（纯 numpy/scipy，惰性导入，缺库时给出原因而不是崩） |
 | `_test_web_exe.py` | **打包产物自检**：起真 exe，验内置 web 资源、接口、exe 同级落盘、SSE 通路、Word 导出、真实浏览器渲染 |
 | `_check_py38_annotations.py` / `_list_pe_deps.py` | 辅助脚本：前者扫"3.8 上会在导入时炸的注解写法"，后者列出 PE 的真实 DLL 依赖（用来定位冻结后缺哪个运行库） |
 | `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
@@ -702,7 +705,7 @@ Word 导出走 `docx_export`。因此代码里同样**没有任何章节↔阶�
 | 视图 | 状态 |
 |---|---|
 | **工作台（十阶段）** | ✅ Phase 1：研究设想可编辑保存；十阶段导轨；每阶段「追问 → 回答 → 改写 → 采纳定稿」；**检查表可逐项勾选 / 全选 / 清空（勾选状态落盘）**；风险提示、下一步；汇总完整草案（含待补清单与投稿前自查）；导出 Markdown / Word；深链接 `?view=work&sid=3` |
-| **统计（九阶段）** | ✅ Phase 2：「结构内容」（要点/示例/公式/陷阱/输出/工具，检验计算阶段附 12 行速查表）⇄「引导完善」（追问 → 回答 → 定稿 → 采纳；自检清单可逐项勾选 / 全选 / 清空，采纳时按模型检查表自动勾选） |
+| **统计（九阶段）** | ✅ Phase 2 + **真实计算**：「结构内容」（要点/示例/公式/陷阱/输出/工具，检验计算阶段附 12 行速查表）⇄「引导完善」（追问 → 回答 → 定稿 → 采纳；自检清单可逐项勾选 / 全选 / 清空，采纳时按模型检查表自动勾选）；阶段里声明的统计工具**已经能真算**（见 8.2） |
 | **SCI 结构（七章）** | ✅ Phase 2：同一套模板；「结构内容」给出通用模型组件（EN+中）、必写/禁写、语言时态规则与词块组（均带书内页码） |
 | **总览** | ✅ 收敛推理可跑（SSE + reason 模式）+ 三条工作线 + 十阶段进度表；**各章带可点击跳转**（见下） |
 
@@ -727,23 +730,61 @@ Word 导出走 `docx_export`。因此代码里同样**没有任何章节↔阶�
 
 ```bat
 :: 双击即可（自动找 Python 3.8 → 装依赖 → 打包 → 跑自检）
-编译_Win7_Web版.bat
+编译_Win7_Web版.bat              :: 仅界面，约 22 MB（推荐）
+编译_Win7_Web版.bat scipy        :: 连统计计算一起打，约 190 MB
 
 :: 等价于
 py -3.8 -m pip install "pyinstaller==6.10" certifi python-docx
 py -3.8 -m PyInstaller --noconfirm --clean --distpath dist-web --workpath build-web ^
         pclradiomics_web_win7.spec
+set PCL_WEB_WITH_SCIPY=1 & py -3.8 -m PyInstaller --noconfirm --clean ^
+        --distpath dist-web-scipy --workpath build-web-scipy pclradiomics_web_win7.spec
 ```
 
-| 产物 | 体积 | 说明 |
+| 产物 | 体积（实测） | 说明 |
 |---|---|---|
-| `dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe` | 目录约 18 MB | **推荐**：启动快、不解包、便于整目录拷走 |
-| `dist-web\PCLRadiomicsWeb.exe` | 单文件约 10 MB | 便于传输；启动稍慢（每次解包到临时目录） |
+| `dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe`（默认） | 目录 **22.2 MB** / 单文件 **10.4 MB** | **推荐**：启动快、不解包；统计页的计算面板会明确提示"本产物未内置 numpy/scipy" |
+| `dist-web-scipy\PCLRadiomicsWeb\PCLRadiomicsWeb.exe`（`scipy` 参数） | 目录 **190.3 MB** / 单文件 **64.5 MB** | 连统计计算一起打：16 种检验、效应量、样本量、多重比较校正都能在 Win7 上离线算 |
+
+体积差主要来自 BLAS：numpy / scipy 的 wheel 各自带一份 OpenBLAS（各约 34 MB），
+再加 scipy 自身的二进制。如果目标机本来就不需要统计计算，用默认产物即可。
 
 产物里**已经包含**：Python 3.8 运行时、界面（`web/`）、`certifi` 根证书（连模型 API 用）、
 `python-docx` + `lxml`（导出 Word）、以及 OpenSSL / libxml2 一族 DLL。
 拷到 Win7 后双击 exe：本机起服务并自动用 Chrome/Edge/Firefox 打开界面；
 数据（`projects\`、`llm_config.json`）写在 **exe 同级目录**，绿色便携、可整体搬走。
+
+### 8.2 统计页接真实计算（numpy / scipy）
+
+统计九阶段里声明的**五个计算工具**现在都真的能算（`stat_tools.py`，纯 numpy+scipy，不依赖 Qt / 不调模型）：
+
+| 工具 | 做什么 | 挂在哪个环节 |
+|---|---|---|
+| `stat_describe` | 描述性统计（n/SD/中位数/IQR）+ Shapiro 正态性 + Levene 方差齐性，并给出"该用哪种检验"的提示 | 04 探索性分析 EDA |
+| `stat_run_test` | **16 种假设检验**：独立/配对/Welch t、Mann–Whitney、Wilcoxon（含单样本）、ANOVA、Kruskal–Wallis、Levene、Pearson/Spearman/Kendall、卡方、Fisher、二项比例 | 05 前提条件诊断、06 检验计算 |
+| `stat_effect_ci` | 效应量与 95%CI：均数差、Cohen's d / Hedges' g、OR·RD、r（Fisher z） | 07 效应量与置信区间 |
+| `stat_sample_size` | 样本量估算：两均数 / 两比例 / 单均数 / 相关（正态近似，给出 α 与把握度） | 02 研究设计与样本量 |
+| `stat_correct_pvalues` | 多重比较校正：bonferroni / holm / fdr_bh | 06 检验计算 |
+
+界面上的做法（仍然**没有**额外的对应表）：**每个环节能用哪些计算，直接看它在 `stat_data.py` 里声明的
+`tools`** —— 统计 06 声明的 `stat_run_test, stat_correct_pvalues` 就决定它只出现"假设检验"和
+"多重比较校正"两个动作；没声明计算工具的环节（如 03 数据采集）不会出现计算面板。
+
+每次计算都会：**① 给出中文结论句**（可直接粘进 SAP/论文，如
+`Welch t 检验 结果：均数差 = -0.195（95%CI -0.262–-0.128），统计量 = -6.113，df = 18.0，P < 0.001…`）；
+**② 记进本环节的「计算记录」并随项目保存**；**③ 进入喂给模型的素材摘要**，
+所以后续的追问/定稿会引用**真实算出来的数字**，而不是编。记录可以一键「写入草稿 / 写入定稿」或删除。
+
+```bat
+:: 计算层自检（离线，不调模型）
+python stat_tools.py            :: 手算几个例子打印结论句
+python _test_web.py             :: 含 90+ 项计算断言（对照解析解与冻结基线）
+```
+
+> **没有 numpy/scipy 时不会崩**：`/api/stat/tools` 会回传 `ok:false` 与确切原因，
+> 界面把计算面板换成一句"计算层不可用 + 怎么补"的提示，其余功能照常。
+> 打包产物默认不带计算层（见 8.1），带 `scipy` 参数构建的产物则带上。
+
 
 > 打包踩过的两个坑（都写进 spec 了）：conda 版 Python 把 OpenSSL / libxml2 放在
 > `Library\bin`，PyInstaller 默认收不到 —— 冻结后会依次报
@@ -757,18 +798,20 @@ py -3.8 -m PyInstaller --noconfirm --clean --distpath dist-web --workpath build-
 > 所以自检里加了"用 3.8 真 import 一遍全部模块"（`_check_py38_annotations.py`）。
 
 ```bat
-:: Web 版自检：144 项（接口 / 静态资源 / 目录穿越 / SSE 推理 / 工作台闭环 / scope 闭环 /
-::             导出 / 检查表与自检勾选 / 引用解析与互跳 / 项目管理 / 离线无外链 / Python 3.8 真 import）
+:: Web 版自检：201 项（接口 / 静态资源 / 目录穿越 / SSE 推理 / 工作台闭环 / scope 闭环 /
+::             真实统计计算（对照解析解与冻结基线）/ 导出 / 检查表与自检勾选 /
+::             引用解析与互跳 / 项目管理 / 离线无外链 / Python 3.8 真 import）
 python _test_web.py
 
-:: 打包产物自检：起真 exe，验内置资源、接口、落盘、SSE 通路、Word 导出与浏览器渲染（18 项）
-python _test_web_exe.py
-python _test_web_exe.py --exe dist-web\PCLRadiomicsWeb.exe      :: 验单文件版
+:: 打包产物自检：起真 exe，验内置资源、接口、落盘、SSE 通路、Word 导出、统计计算与浏览器渲染
+python _test_web_exe.py                                          :: 默认产物 20 项
+python _test_web_exe.py --exe dist-web-scipy\PCLRadiomicsWeb\PCLRadiomicsWeb.exe  :: 带计算层 22 项
+python _test_web_exe.py --exe dist-web\PCLRadiomicsWeb.exe       :: 验单文件版
 
-:: 渲染与交互核对：造演示项目 → 起服务 → 无头 Chrome 截图 10 张 + 渲染后 DOM 判定 35 项
-::               + 真实点击跑一遍闭环 13 项（追问 / 速读串联 / 改写 / 采纳 / 汇总 /
+:: 渲染与交互核对：造演示项目 → 起服务 → 无头 Chrome 截图 10 张 + 渲染后 DOM 判定 41 项
+::               + 真实点击跑一遍闭环 14 项（追问 / 速读串联 / 改写 / 采纳 / 汇总 /
 ::                统计追问 / 统计定稿 / 统计采纳 / 自检勾选 / SCI 追问 /
-::                章节跳转 / 工作台检查表勾选 / 回跳总览）
+::                章节跳转 / 工作台检查表勾选 / 回跳总览 / 真实计算并写入草稿）
 python _probe_web.py
 ::   截图落在 _shots\web_*.png（深浅两色、宽窄两档、工作台/统计/SCI/总览）
 ::   交互核对的做法：把一段自测脚本注入 web/ 的**临时副本**（不改仓库里的正式界面文件），
@@ -829,6 +872,14 @@ D:\python\envs\mar\python.exe _probe_views.py 1120 700
 :: 目标系统检查：当前工具链的最低 Windows 要求 / 某个 exe 是否含 Win8+ 专有 API set
 D:\python\envs\mar\python.exe _check_win_target.py
 D:\python\envs\mar\python.exe _check_win_target.py dist\PCLRadiomics\PCLRadiomics.exe
+
+:: Web 版：真实统计计算自检（16 种检验 + 描述统计 + 样本量 + 多重比较校正）
+D:\python\envs\mar\python.exe stat_tools.py
+
+:: Web 版：126→201 项全量自检（含计算断言）、打包产物 20/22 项、浏览器渲染+交互 65 项
+D:\python\envs\mar\python.exe _test_web.py
+D:\python\envs\mar\python.exe _test_web_exe.py
+D:\python\envs\mar\python.exe _probe_web.py
 ```
 
 ## 五、规范依据

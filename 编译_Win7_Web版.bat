@@ -6,20 +6,40 @@ cd /d "%~dp0"
 echo ============================================================
 echo  组学研究设计工作台 · Windows 7 Web 版（浏览器界面）打包
 echo.
+echo  用法：
+echo    编译_Win7_Web版.bat            仅界面（约 22 MB，推荐）
+echo    编译_Win7_Web版.bat scipy      连统计计算一起打（约 190 MB）
+echo.
 echo  产物：
 echo    dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe   文件夹版（推荐）
 echo    dist-web\PCLRadiomicsWeb.exe                   单文件版（便于传输）
+echo    （带 scipy 时目录换成 dist-web-scipy）
 echo.
 echo  为什么 Win7 上用这个而不是桌面版：
 echo    桌面版依赖 PySide6 / Qt 6，Qt 6 与 Python 3.9+ 都不支持 Win7；
 echo    内嵌浏览器也不行（WebView2 运行时停在支持 Win7 的 109 版）。
 echo    本版是"本地服务 + 系统浏览器"：纯标准库，用 Python 3.8 打包即可。
 echo.
+echo  统计计算（numpy/scipy）：
+echo    默认不打 —— 界面里点「运行」会明确提示"本产物未内置计算层"。
+echo    加 scipy 参数才打进去（统计页的 16 种检验、效应量、样本量、多重比较校正）。
+echo.
 echo  目标机需要：
 echo    Win7 SP1(x64) + KB2533623 + KB2999226(UCRT) + VC++2015-2019 运行库(x64)
 echo    + Chrome 109 / Edge 109 / Firefox 115 ESR（Win7 上最后一批现代浏览器）
 echo ============================================================
 echo.
+
+rem ---- 是否带统计计算层（numpy/scipy）----
+set "WITH_SCIPY="
+set "DISTDIR=dist-web"
+set "WORKDIR=build-web"
+if /i "%~1"=="scipy" (
+  set "WITH_SCIPY=1"
+  set "DISTDIR=dist-web-scipy"
+  set "WORKDIR=build-web-scipy"
+  echo [模式] 带统计计算层（numpy/scipy）—— 先把 numpy/scipy 装进 Python 3.8
+)
 
 rem ---- 找一个 Python 3.8（必须是 3.8，3.9+ 的产物 Win7 起不来）----
 set "PY="
@@ -62,30 +82,39 @@ if errorlevel 1 (
   echo       [提示] 未安装 python-docx：产物只能导出 Markdown。
   echo              需要 Word 导出就执行：%PY% -m pip install python-docx
 )
+if defined WITH_SCIPY (
+  %PY% -c "import numpy,scipy;print('      numpy', numpy.__version__, '| scipy', scipy.version.version)" 2>nul
+  if errorlevel 1 (
+    echo       缺少 numpy/scipy，尝试安装（需要联网，约 60 MB）...
+    %PY% -m pip install numpy scipy || goto :fail
+  )
+  set "PCL_WEB_WITH_SCIPY=1"
+)
 
-echo [3/4] 打包（约 1-2 分钟）...
-%PY% -m PyInstaller --noconfirm --clean --distpath dist-web --workpath build-web pclradiomics_web_win7.spec || goto :fail
+echo [3/4] 打包（约 1-3 分钟）...
+%PY% -m PyInstaller --noconfirm --clean --distpath %DISTDIR% --workpath %WORKDIR% pclradiomics_web_win7.spec || goto :fail
 
-if not exist "dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe" goto :fail
-if not exist "dist-web\PCLRadiomicsWeb.exe" goto :fail
+if not exist "%DISTDIR%\PCLRadiomicsWeb\PCLRadiomicsWeb.exe" goto :fail
+if not exist "%DISTDIR%\PCLRadiomicsWeb.exe" goto :fail
 
 echo.
 echo [4/4] 自检
 echo ---- Windows 7 兼容性（PE 导入检查）----
 if exist "D:\python\envs\mar\python.exe" (
-  "D:\python\envs\mar\python.exe" _check_win_target.py "dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe"
-  "D:\python\envs\mar\python.exe" _check_win_target.py "dist-web\PCLRadiomicsWeb\_internal\python38.dll"
-  echo ---- 端到端（起真 exe，验接口 / 静态资源 / SSE / Word 导出 / 浏览器渲染）----
-  "D:\python\envs\mar\python.exe" _test_web_exe.py
+  "D:\python\envs\mar\python.exe" _check_win_target.py "%DISTDIR%\PCLRadiomicsWeb\PCLRadiomicsWeb.exe"
+  "D:\python\envs\mar\python.exe" _check_win_target.py "%DISTDIR%\PCLRadiomicsWeb\_internal\python38.dll"
+  echo ---- 端到端（起真 exe，验接口 / 静态资源 / SSE / Word 导出 / 统计计算 / 浏览器渲染）----
+  "D:\python\envs\mar\python.exe" _test_web_exe.py --exe "%DISTDIR%\PCLRadiomicsWeb\PCLRadiomicsWeb.exe"
 ) else (
-  %PY% _check_win_target.py "dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe"
-  echo [提示] 想跑完整端到端自检，请用任意 Python 3.9+ 执行：python _test_web_exe.py
+  %PY% _check_win_target.py "%DISTDIR%\PCLRadiomicsWeb\PCLRadiomicsWeb.exe"
+  echo [提示] 想跑完整端到端自检，请用任意 Python 3.9+ 执行：
+  echo        python _test_web_exe.py --exe %DISTDIR%\PCLRadiomicsWeb\PCLRadiomicsWeb.exe
 )
 
 echo.
 echo [成功] 产物：
-echo     dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe   ← 整个文件夹拷到 Win7
-echo     dist-web\PCLRadiomicsWeb.exe                   ← 或只要这一个文件（启动稍慢）
+echo     %DISTDIR%\PCLRadiomicsWeb\PCLRadiomicsWeb.exe   ← 整个文件夹拷到 Win7
+echo     %DISTDIR%\PCLRadiomicsWeb.exe                   ← 或只要这一个文件（启动稍慢）
 echo.
 echo 拷到 Win7 机器后：
 echo     双击 PCLRadiomicsWeb.exe

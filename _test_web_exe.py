@@ -187,7 +187,34 @@ def main() -> int:
         check("并以 done.ok=false 收尾（前端能正确提示）",
               bool(done) and done[-1].get("ok") is False, str(kinds[-3:]))
 
-        print("\n[4] 项目管理收尾")
+        print("\n[4] 统计计算（numpy/scipy 是否随产物一起打包）")
+        code, body, _ = get(base + "/api/stat/tools")
+        tools = json.loads(body.decode("utf-8"))
+        avail = tools.get("available") or {}
+        check("GET /api/stat/tools 有明确答复（可用或给出原因）",
+              code == 200 and ("ok" in avail), body[:200].decode("utf-8", "ignore"))
+        check("16 种检验元数据随产物一起提供",
+              len(tools.get("kinds") or []) == 16, str(len(tools.get("kinds") or [])))
+        if avail.get("ok"):
+            code, body = post(base + "/api/stat/run", {
+                "project": "自检临时课题", "page": "stat", "key": "",
+                "action": "test", "kind": "welch",
+                "groups": ["1 2 3 4 5", "6 7 8 9 10"], "alpha": 0.05})
+            j = json.loads(body.decode("utf-8"))
+            check("冻结产物能跑真实统计计算（numpy %s / scipy %s）"
+                  % (avail.get("numpy"), avail.get("scipy")),
+                  code == 200 and j.get("ok") and
+                  abs(float(j["result"]["statistic"]) + 5.0) < 1e-6,
+                  body[:200].decode("utf-8", "ignore"))
+            check("计算结果落进项目文件",
+                  bool((j.get("scope", {}).get("node", {}) or {}).get("calc")),
+                  str((j.get("scope", {}).get("node", {}) or {}).get("calc"))[:160])
+        else:
+            print("  –　本产物未内置 numpy/scipy：%s" % avail.get("reason"))
+            print("     界面会提示「计算不可用」，并说明怎么补"
+                  "（源码运行，或带 PCL_WEB_WITH_SCIPY=1 重新打包）")
+
+        print("\n[5] 项目管理收尾")
         code, body = post(base + "/api/project/delete", {"project": "自检临时课题"})
         check("删除临时课题", code == 200 and json.loads(body)["ok"],
               body[:160].decode("utf-8", "ignore"))
@@ -216,7 +243,7 @@ def main() -> int:
                                     base + "/?theme=dark"], capture_output=True, text=True,
                                    timeout=180)
                 size = os.path.getsize(out) if os.path.exists(out) else 0
-                print("\n[5] 浏览器渲染")
+                print("\n[6] 浏览器渲染")
                 check("冻结版服务的界面能被真实浏览器渲染（截图 %d bytes）" % size,
                       size > 20000, (r.stderr or "")[-200:])
                 if size:

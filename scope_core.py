@@ -17,10 +17,10 @@ GUIDE_STATUS = {"todo": "未开始引导", "asked": "已追问 · 待回答",
 
 
 def blank_scope_state() -> dict:
-    """一个环节的完整状态：自检勾选 + 引导式对话（追问/回答/定稿/采纳）。"""
+    """一个环节的完整状态：自检勾选 + 引导式对话（追问/回答/定稿/采纳）+ 真实计算记录。"""
     return {"checks": {}, "status": "todo", "assessment": "", "questions": [],
             "answers": [], "draft": "", "final": "", "risks": "", "suggested": [],
-            "model": "", "updated": ""}
+            "calc": [], "model": "", "updated": ""}
 
 
 def node(store: dict, key: str) -> dict:
@@ -28,7 +28,7 @@ def node(store: dict, key: str) -> dict:
     d = store.setdefault(key, {})
     for k, v in blank_scope_state().items():
         d.setdefault(k, {} if k == "checks" else ([] if k in ("questions", "answers",
-                                                              "suggested") else v))
+                                                              "suggested", "calc") else v))
     return d
 
 

@@ -317,6 +317,400 @@ function boxText(id) {
   return el ? el.value : '';
 }
 
+/* ----------------------------------------------- 真实统计计算（numpy/scipy） */
+/* 计算层的可用性与 16 种检验的元数据由 /api/stat/tools 提供；
+   每个环节能用哪些计算，直接看该环节在 stat_data 里声明的 tools —— 没有额外对应表。 */
+var CALC_TOOLS = null;
+var CALC_RESULT = null;
+var TOOL_ACTIONS = [
+  { tool: 'stat_describe', action: 'describe', name: '描述性统计 + 正态性/方差齐' },
+  { tool: 'stat_run_test', action: 'test', name: '假设检验（16 种）' },
+  { tool: 'stat_effect_ci', action: 'effect', name: '效应量与置信区间' },
+  { tool: 'stat_sample_size', action: 'sample_size', name: '样本量估算' },
+  { tool: 'stat_correct_pvalues', action: 'correct', name: '多重比较校正' }
+];
+var KIND_GROUPS = [
+  ['两组比较', ['ttest_ind', 'welch', 'mannwhitney']],
+  ['配对 / 前后', ['ttest_paired', 'wilcoxon']],
+  ['单样本', ['ttest_1samp', 'wilcoxon_1samp']],
+  ['多组', ['anova', 'kruskal', 'levene']],
+  ['相关', ['pearson', 'spearman', 'kendall']],
+  ['列联表 / 比例', ['chisq', 'fisher', 'binom_prop']]
+];
+var SHAPE_OF = {};
+
+function calcActionsFor(d) {
+  var tools = (d.section || {}).tools || [];
+  return TOOL_ACTIONS.filter(function (t) { return tools.indexOf(t.tool) >= 0; });
+}
+
+function kindOptions() {
+  if (!CALC_TOOLS) { return ''; }
+  var byKind = {};
+  (CALC_TOOLS.kinds || []).forEach(function (k) { byKind[k.kind] = k; });
+  return KIND_GROUPS.map(function (g) {
+    return '<optgroup label="' + esc(g[0]) + '">' + g[1].filter(function (k) {
+      return byKind[k];
+    }).map(function (k) {
+      SHAPE_OF[k] = byKind[k].shape;
+      return '<option value="' + k + '">' + esc(byKind[k].name) +
+             '（' + k + '）</option>';
+    }).join('') + '</optgroup>';
+  }).join('');
+}
+
+function calcPanelHtml(d) {
+  var acts = calcActionsFor(d);
+  if (!acts.length && (d.section || {}).id !== 6) { return ''; }
+  var avail = (CALC_TOOLS || {}).available || {};
+  var head = sec('真实计算（本地 numpy/scipy，不调用模型）', '');
+  if (!CALC_TOOLS) {
+    return head + '<div class="box">正在读取计算层…</div>';
+  }
+  if (!avail.ok) {
+    return head + '<div class="box warn">本环境的统计计算不可用：' + esc(avail.reason || '') +
+      '。用源码运行（启动_Web版.bat）或重建打包时保留 numpy/scipy 即可。</div>';
+  }
+  if (!acts.length) { return ''; }
+  var node = d.node || {};
+  var h = [head];
+  h.push('<div class="calcbox">');
+  h.push('<div class="row">' +
+    '<label class="meta">计算</label>' +
+    '<select id="calcAction" class="sel">' + acts.map(function (a, i) {
+      return '<option value="' + a.action + '"' + (i === 0 ? ' selected' : '') + '>' +
+             esc(a.name) + '</option>';
+    }).join('') + '</select>' +
+    '<span id="calcKindWrap"><label class="meta">检验</label>' +
+    '<select id="calcKind" class="sel">' + kindOptions() + '</select></span>' +
+    '<label class="meta">α</label>' +
+    '<input id="calcAlpha" class="num" type="number" step="0.01" min="0.001" max="0.2" value="0.05">' +
+    '<label class="meta"><input id="calcNoSave" type="checkbox"> 只试算不记录</label>' +
+    '<button id="calcRun" class="btn primary" type="button">运行</button>' +
+    '<span class="meta" id="calcEnv">numpy ' + esc(avail.numpy) + ' · scipy ' +
+    esc(avail.scipy) + '</span></div>');
+
+  h.push('<div class="calcblock" data-for="multi">' +
+    '<div class="row"><label class="meta">组数</label>' +
+    '<input id="calcGCount" class="num" type="number" min="2" max="6" value="2">' +
+    '<span class="meta">每组一行/一栏，数字用空格、逗号或换行分隔</span></div>' +
+    [0, 1, 2, 3, 4, 5].map(function (i) {
+      return '<textarea class="ta calcg" data-g="' + i + '" rows="2" placeholder="第 ' +
+             (i + 1) + ' 组数据，如 1.2 3.4 5.6"></textarea>';
+    }).join('') + '</div>');
+
+  h.push('<div class="calcblock" data-for="paired">' +
+    '<textarea class="ta" id="calcX" rows="2" placeholder="第 1 列 / 处理前"></textarea>' +
+    '<textarea class="ta" id="calcY" rows="2" placeholder="第 2 列 / 处理后（与上面一一对应）"></textarea>' +
+    '</div>');
+  h.push('<div class="calcblock" data-for="one">' +
+    '<textarea class="ta" id="calcOneX" rows="2" placeholder="样本数据"></textarea>' +
+    '<div class="row"><label class="meta">μ₀</label>' +
+    '<input id="calcMu" class="num" type="number" step="any" value="0"></div></div>');
+  h.push('<div class="calcblock" data-for="table">' +
+    '<div class="row"><span class="meta">2×2 列联表</span></div>' +
+    '<div class="row">' +
+    ['a', 'b', 'c', 'd'].map(function (k, i) {
+      return '<input id="calcT' + k + '" class="num" type="number" min="0" step="1" value="' +
+             (i === 0 ? 10 : i === 1 ? 20 : i === 2 ? 30 : 40) + '">';
+    }).join('') + '</div>' +
+    '<div class="meta">a=暴露且结局+，b=暴露且结局−，c=非暴露且结局+，d=非暴露且结局−</div></div>');
+  h.push('<div class="calcblock" data-for="binom">' +
+    '<div class="row"><label class="meta">成功数 k</label>' +
+    '<input id="calcK" class="num" type="number" min="0" step="1" value="18">' +
+    '<label class="meta">总数 n</label>' +
+    '<input id="calcN" class="num" type="number" min="1" step="1" value="30">' +
+    '<label class="meta">p₀</label>' +
+    '<input id="calcP0" class="num" type="number" step="0.01" value="0.5"></div></div>');
+  h.push('<div class="calcblock" data-for="sample">' +
+    '<div class="row"><label class="meta">场景</label>' +
+    '<select id="calcSampleKind" class="sel">' +
+    ((CALC_TOOLS || {}).sample_kinds || []).map(function (k) {
+      return '<option value="' + k.key + '">' + esc(k.name) + '</option>';
+    }).join('') + '</select>' +
+    '<label class="meta">α</label><input id="calcSAlpha" class="num" type="number" ' +
+    'step="0.01" value="0.05">' +
+    '<label class="meta">把握度</label><input id="calcPower" class="num" type="number" ' +
+    'step="0.05" min="0.5" max="0.99" value="0.80"></div>' +
+    '<div class="row"><label class="meta">d</label>' +
+    '<input id="calcD" class="num" type="number" step="0.05" placeholder="0.5">' +
+    '<label class="meta">SD</label>' +
+    '<input id="calcSd" class="num" type="number" step="any" placeholder="如 12">' +
+    '<label class="meta">Δ</label>' +
+    '<input id="calcDelta" class="num" type="number" step="any" placeholder="如 5"></div>' +
+    '<div class="row"><label class="meta">p1</label>' +
+    '<input id="calcP1" class="num" type="number" step="0.01" placeholder="0.30">' +
+    '<label class="meta">p2</label>' +
+    '<input id="calcP2" class="num" type="number" step="0.01" placeholder="0.15">' +
+    '<label class="meta">r</label>' +
+    '<input id="calcR" class="num" type="number" step="0.05" placeholder="0.30"></div></div>');
+  h.push('<div class="calcblock" data-for="correct">' +
+    '<textarea class="ta" id="calcPvals" rows="3" ' +
+    'placeholder="每行一个 P 值，或空格/逗号分隔，如 0.01 0.04 0.03"></textarea>' +
+    '<div class="row"><label class="meta">校正方法</label>' +
+    '<select id="calcMethod" class="sel">' +
+    ((CALC_TOOLS || {}).corrections || []).map(function (c) {
+      return '<option value="' + c.key + '">' + esc(c.name) + '</option>';
+    }).join('') + '</select></div></div>');
+
+  h.push('<div id="calcResult" class="calcresult"></div>');
+  h.push('<div class="wt">计算记录（会作为素材交给模型引用）</div><div id="calcRecords"></div>');
+  h.push('</div>');
+  return h.join('');
+}
+
+function calcShowBlocks() {
+  var act = $('calcAction') ? $('calcAction').value : 'test';
+  var kind = $('calcKind') ? $('calcKind').value : 'welch';
+  var shape = SHAPE_OF[kind] || 'two';
+  var wrapped = $('calcKindWrap');
+  if (wrapped) { wrapped.hidden = (act !== 'test' && act !== 'effect'); }
+  Array.prototype.forEach.call(document.querySelectorAll('.calcblock'), function (el) {
+    var want = el.getAttribute('data-for');
+    var show = false;
+    if (act === 'describe') { show = (want === 'multi'); }
+    else if (act === 'sample_size') { show = (want === 'sample'); }
+    else if (act === 'correct') { show = (want === 'correct'); }
+    else if (act === 'test' || act === 'effect') {
+      if (shape === 'table' || shape === 'table2') { show = (want === 'table'); }
+      else if (shape === 'binom') { show = (want === 'binom'); }
+      else if (shape === 'one') { show = (want === 'one'); }
+      else if (shape === 'paired') { show = (want === 'paired'); }
+      else { show = (want === 'multi'); }
+    }
+    el.hidden = !show;
+  });
+  var gc = $('calcGCount');
+  if (gc) {
+    var n = Math.max(2, Math.min(6, parseInt(gc.value, 10) || 2));
+    Array.prototype.forEach.call(document.querySelectorAll('.calcg'), function (t) {
+      t.hidden = (parseInt(t.getAttribute('data-g'), 10) >= n);
+    });
+  }
+}
+
+function calcGroups() {
+  var n = Math.max(2, Math.min(6, parseInt(($('calcGCount') || {}).value, 10) || 2));
+  var out = [];
+  Array.prototype.forEach.call(document.querySelectorAll('.calcg'), function (t) {
+    if (parseInt(t.getAttribute('data-g'), 10) < n && t.value.trim()) {
+      out.push(t.value);
+    }
+  });
+  return out;
+}
+
+function collectCalcArgs() {
+  var act = $('calcAction').value;
+  var kind = $('calcKind') ? $('calcKind').value : 'welch';
+  var args = { action: act, kind: kind, alpha: parseFloat($('calcAlpha').value) || 0.05 };
+  if (act === 'describe') {
+    args.groups = calcGroups();
+  } else if (act === 'correct') {
+    args.pvals = $('calcPvals').value;
+    args.method = $('calcMethod').value;
+  } else if (act === 'sample_size') {
+    args.kind = $('calcSampleKind').value;
+    args.alpha = parseFloat($('calcSAlpha').value) || 0.05;
+    args.power = parseFloat($('calcPower').value) || 0.8;
+    ['d', 'sd', 'delta', 'p1', 'p2', 'r'].forEach(function (k) {
+      var el = $('calc' + k.charAt(0).toUpperCase() + k.slice(1));
+      args[k] = el && el.value !== '' ? el.value : '';
+    });
+  } else {
+    var shape = SHAPE_OF[kind] || 'two';
+    if (shape === 'table' || shape === 'table2') {
+      args.table = [[$('calcTa').value, $('calcTb').value],
+                    [$('calcTc').value, $('calcTd').value]];
+    } else if (shape === 'binom') {
+      args.successes = $('calcK').value;
+      args.trials = $('calcN').value;
+      args.p0 = $('calcP0').value;
+    } else if (shape === 'one') {
+      args.x = $('calcOneX').value;
+      args.mu = $('calcMu').value;
+    } else if (shape === 'paired') {
+      args.x = $('calcX').value;
+      args.y = $('calcY').value;
+    } else {
+      args.groups = calcGroups();
+    }
+  }
+  return args;
+}
+
+function num(x, d) {
+  if (x === null || x === undefined || x === '' || isNaN(x)) { return '—'; }
+  return Number(x).toFixed(d === undefined ? 3 : d);
+}
+
+function calcResultHtml(r) {
+  if (!r) { return ''; }
+  var eff = r.effect || {}, eff2 = r.effect2 || {};
+  var h = ['<div class="card calcres">'];
+  h.push('<div class="cardhead"><h2>' + esc(r.name || r.action) + '</h2>' +
+         '<span class="tag ok">' + esc(r.kind || r.method || '') + '</span></div>');
+  h.push('<table class="tbl"><tbody>');
+  function row(k, v) { h.push('<tr><td class="dim">' + k + '</td><td>' + v + '</td></tr>'); }
+  if (r.statistic !== undefined && r.statistic !== null) { row('统计量', num(r.statistic)); }
+  if (r.df !== undefined && r.df !== null) {
+    row('df', Array.isArray(r.df) ? r.df.join(', ') : num(r.df, 1));
+  }
+  if (r.p !== undefined && r.p !== null) {
+    row('P', (r.p < 0.001 ? '<b>' + r.p.toExponential(2) + '</b>' : num(r.p)) +
+        (r.significant ? '　<b class="oktxt">显著</b>' : ''));
+  }
+  if (eff.name) {
+    row(esc(eff.name), num(eff.value) + (eff.ci
+      ? '　95%CI ' + num(eff.ci[0]) + '–' + num(eff.ci[1]) : ''));
+  }
+  if (eff2.name) { row(esc(eff2.name), num(eff2.value) + (eff2.g ? '（Hedges g ' + num(eff2.g) + '）' : '')); }
+  h.push('</tbody></table>');
+  if (r.sentence) {
+    h.push('<div class="box okbox">' + esc(r.sentence) + '</div>');
+  }
+  if (r.text && r.text !== r.sentence) {
+    h.push('<pre class="raw calctext">' + esc(r.text) + '</pre>');
+  }
+  (r.notes || []).forEach(function (n) {
+    h.push('<div class="box warn">' + esc(n) + '</div>');
+  });
+  if (r.extra && r.extra.warn) { h.push('<div class="box warn">' + esc(r.extra.warn) + '</div>'); }
+  h.push('<div class="row"><button class="btn" type="button" id="calcToDraft">写入草稿</button>' +
+         '<button class="btn" type="button" id="calcToFinal">写入定稿</button>' +
+         '<button class="btn ghost" type="button" id="calcCopy">复制结论句</button></div>');
+  h.push('</div>');
+  return h.join('');
+}
+
+function renderCalcResult() {
+  var box = $('calcResult');
+  if (box) { box.innerHTML = calcResultHtml(CALC_RESULT); }
+  bindCalcResultButtons();
+}
+
+function renderCalcRecords() {
+  var box = $('calcRecords');
+  if (!box) { return; }
+  var d = SCOPES.stat.data || {};
+  var calc = ((d.node || {}).calc) || [];
+  if (!calc.length) {
+    box.innerHTML = '<div class="empty">还没有计算记录。运行一次计算会自动记在这里，' +
+      '并随项目一起保存（引导对话时也会作为素材交给模型）。</div>';
+    return;
+  }
+  box.innerHTML = calc.map(function (c, i) {
+    return '<div class="calcrow"><div class="crhead"><b>' + esc(c.name || c.kind) + '</b>' +
+      '<span class="meta">' + esc(c.ts || '') + '</span></div>' +
+      '<div class="crsent">' + esc(c.sentence || '') + '</div>' +
+      '<div class="row"><button class="btn tiny" type="button" data-calc-write="' + i +
+      '" data-target="draft">写入草稿</button>' +
+      '<button class="btn tiny" type="button" data-calc-write="' + i +
+      '" data-target="final">写入定稿</button>' +
+      '<button class="btn tiny danger" type="button" data-calc-del="' + i +
+      '">删除</button></div></div>';
+  }).join('');
+}
+
+function bindCalcResultButtons() {
+  var toDraft = $('calcToDraft'), toFinal = $('calcToFinal'), copy = $('calcCopy');
+  if (toDraft) {
+    toDraft.addEventListener('click', function () {
+      if (CALC_RESULT) { writeCalc(CALC_RESULT.sentence || CALC_RESULT.text, 'draft'); }
+    });
+  }
+  if (toFinal) {
+    toFinal.addEventListener('click', function () {
+      if (CALC_RESULT) { writeCalc(CALC_RESULT.sentence || CALC_RESULT.text, 'final'); }
+    });
+  }
+  if (copy) {
+    copy.addEventListener('click', function () {
+      var text = CALC_RESULT ? (CALC_RESULT.sentence || CALC_RESULT.text) : '';
+      if (!text) { return; }
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function () { toast('已复制结论句'); },
+          function () { toast('复制失败（浏览器未授权剪贴板）'); });
+      } else {
+        window.prompt('手动复制：', text);
+      }
+    });
+  }
+}
+
+function runCalc() {
+  var args = collectCalcArgs();
+  args.project = STATE.current;
+  args.page = 'stat';
+  args.key = SCOPES.stat.cur;
+  args.save = !($('calcNoSave') && $('calcNoSave').checked);
+  var btn = $('calcRun');
+  if (btn) { btn.disabled = true; }
+  post(API + '/stat/run', args).then(function (j) {
+    CALC_RESULT = j.result;
+    if (j.scope) { SCOPES.stat.data = j.scope; renderCalcRecords(); }
+    if (j.state) { STATE = j.state; renderTopbar(j.state); }
+    renderCalcResult();
+    toast('计算完成：' + (j.result.name || ''));
+  }).catch(function (e) {
+    toast('计算失败：' + e.message, 8000);
+  }).then(function () {
+    if (btn) { btn.disabled = false; }
+  });
+}
+
+function writeCalc(text, target) {
+  post(API + '/stat/apply', {
+    project: STATE.current, page: 'stat', key: SCOPES.stat.cur,
+    text: text, target: target
+  }).then(function (j) {
+    if (j.scope) { SCOPES.stat.data = j.scope; }
+    if (j.state) { STATE = j.state; renderTopbar(j.state); }
+    renderScopeDetail('stat');
+    toast(target === 'final' ? '已写入定稿' : '已写入草稿');
+  }).catch(function (e) { toast('写入失败：' + e.message); });
+}
+
+function bindCalc() {
+  var host = $('statBody');
+  if (!host) { return; }
+  host.addEventListener('change', function (ev) {
+    var id = ev.target.id;
+    if (id === 'calcAction' || id === 'calcKind' || id === 'calcGCount') {
+      calcShowBlocks();
+    }
+  });
+  host.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (t.id === 'calcRun') { runCalc(); return; }
+    var w = t.getAttribute && t.getAttribute('data-calc-write');
+    if (w !== null && w !== undefined) {
+      var d = SCOPES.stat.data || {};
+      var rec = (((d.node || {}).calc) || [])[parseInt(w, 10)];
+      if (rec) { writeCalc(rec.sentence || rec.text, t.getAttribute('data-target')); }
+      return;
+    }
+    var del = t.getAttribute && t.getAttribute('data-calc-del');
+    if (del !== null && del !== undefined) {
+      post(API + '/stat/apply', {
+        project: STATE.current, page: 'stat', key: SCOPES.stat.cur, remove: parseInt(del, 10)
+      }).then(function (j) {
+        if (j.scope) { SCOPES.stat.data = j.scope; renderCalcRecords(); }
+        toast('已删除该条计算记录');
+      }).catch(function (e) { toast('删除失败：' + e.message); });
+    }
+  });
+}
+
+function loadCalcTools() {
+  fetch(API + '/stat/tools', { cache: 'no-store' }).then(function (r) { return r.json(); })
+    .then(function (d) {
+      CALC_TOOLS = d;
+      if (SCOPES.stat.data) { renderScopeDetail('stat'); }
+    })
+    .catch(function () { CALC_TOOLS = { available: { ok: false, reason: '读取失败' }, kinds: [] }; });
+}
+
 /* ------------------------------------------------------- 统计 / SCI 结构 */
 /* 两页共用一套模板：左栏环节导轨 + 右栏「结构内容 ⇄ 引导完善」。
    引导闭环与工作台同构（追问 → 回答 → 定稿 → 采纳），区别在于它由**本环节的规范内容**
@@ -426,6 +820,11 @@ function renderScopeDetail(page) {
   $(cfg.bodyId).innerHTML = scopeGuideHtml(page, d);
   $(cfg.actionsId).innerHTML = scopeActionsHtml(page, d);
   bindChecklist(page);
+  if (page === 'stat') {
+    calcShowBlocks();
+    renderCalcRecords();
+    renderCalcResult();
+  }
   setBusy(BUSY);
 }
 
@@ -504,6 +903,7 @@ function scopeGuideHtml(page, d) {
         esc((node.answers || [])[i] || '') + '</textarea></div>';
     }).join('')));
   }
+  if (page === 'stat') { h.push(calcPanelHtml(d)); }
   if (node.draft) {
     h.push(sec('定稿（可直接编辑；采纳后收录并自动勾选自检项）',
       '<textarea id="' + page + 'DraftBox" class="ta" rows="12">' + esc(node.draft) +
@@ -1209,9 +1609,11 @@ function boot() {
   bindProjects();
   bindWork();
   bindScope('stat');
+  bindCalc();
   bindScope('shape');
   bindConvergence();
   bindConvergenceLinks();
+  loadCalcTools();
   var k0 = QQ.get('key');                          // 深链接：?view=stat&key=s3_power
   if (k0) {
     SCOPES.stat.cur = k0;

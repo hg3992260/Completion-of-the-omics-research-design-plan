@@ -14,6 +14,8 @@ dist_onefile/
 build_onefile/
 dist-web/
 build-web/
+dist-web-scipy/
+build-web-scipy/
 *.manifest
 
 # 自检/调试输出（脚本本身保留，输出不入库）

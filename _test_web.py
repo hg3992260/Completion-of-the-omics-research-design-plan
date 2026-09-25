@@ -285,6 +285,15 @@ def main() -> int:
         ext = re.findall(r"(?:src|href)\s*=\s*[\"'](https?:)?//[^\"']+", html)
         check("页面无外部 CDN 引用", not ext, str(ext[:3]))
 
+        # 路由健全性：do_GET / do_POST 里引用的处理函数必须真的存在
+        # （防止改代码时把某个 def 行粘连/删掉 —— 这类错误只会在请求到来时才炸）
+        import inspect
+        src_handler = inspect.getsource(web_server.Handler.do_GET) + \
+            inspect.getsource(web_server.Handler.do_POST)
+        calls = set(re.findall(r"self\.(_[a-z_]+)\(", src_handler))
+        missing = sorted(n for n in calls if not hasattr(web_server.Handler, n))
+        check("所有路由的处理函数都存在", not missing, str(missing))
+
         # 目录穿越防护
         code, body, _ = get(base + "/static/..%2fweb_server.py")
         check("静态目录穿越被拒", code in (403, 404), "code=%s" % code)
@@ -752,8 +761,223 @@ def main() -> int:
               (saved["stages"]["2"].get("checklist_done") or {}) == {"1": True},
               str(saved["stages"]["2"].get("checklist_done")))
 
-        # ---------------------------------------------------------- 9 离线/兼容
-        print("\n[8] 离线可用性与 Python 3.8 兼容")
+        # ---------------------------------------------------------- 9 真实统计计算
+        print("\n[8] 真实统计计算（stat_tools：numpy + scipy）")
+        import stat_tools
+
+        def close(a, b, tol=1e-3):
+            try:
+                return abs(float(a) - float(b)) <= tol
+            except (TypeError, ValueError):
+                return False
+
+        code, body, _ = get(base + "/api/stat/tools")
+        t = json.loads(body)
+        check("GET /api/stat/tools 200 且计算层可用",
+              code == 200 and t.get("available", {}).get("ok"), body[:200])
+        check("报告 numpy/scipy 版本",
+              bool(t.get("available", {}).get("numpy")) and
+              bool(t.get("available", {}).get("scipy")), str(t.get("available")))
+        check("16 种检验元数据齐全", len(t.get("kinds") or []) == 16,
+              str(len(t.get("kinds") or [])))
+        check("与 stat_data.TEST_KINDS 完全一致",
+              [k["kind"] for k in t["kinds"]] == list(stat_data.TEST_KINDS),
+              str([k["kind"] for k in t["kinds"]]))
+        check("3 种多重比较校正 + 4 种样本量场景",
+              len(t.get("corrections") or []) == 3 and len(t.get("sample_kinds") or []) == 4)
+
+        r = stat_tools.stat_run_test("welch", groups=[[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+        check("Welch t：统计量与自由度",
+              close(r["statistic"], -5.0) and close(r["df"], 8.0), json.dumps(r)[:160])
+        check("Welch t：P 值与 95%CI（对照解析值）",
+              close(r["p"], 0.0010528) and close(r["effect"]["ci"][0], -7.306, 0.01) and
+              close(r["effect"]["ci"][1], -2.694, 0.01),
+              "%s / %s" % (r["p"], r["effect"]["ci"]))
+        check("Welch 结果带中文结论句",
+              "差异有统计学意义" in r["sentence"] and "95%CI" in r["sentence"],
+              r["sentence"])
+        r2 = stat_tools.stat_run_test("ttest_ind", groups=[[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+        check("独立样本 t（合并方差）给出 df = n1+n2-2", close(r2["df"], 8.0), str(r2["df"]))
+        r3 = stat_tools.stat_run_test("welch", groups=[[1, 2, 3, 4, 5], [1, 10, 20, 30, 45]])
+        r4 = stat_tools.stat_run_test("ttest_ind", groups=[[1, 2, 3, 4, 5], [1, 10, 20, 30, 45]])
+        check("方差不齐时 welch 与合并方差 t 给出不同 P",
+              close(r3["statistic"], -2.36065) and close(r3["p"], 0.076524) and
+              close(r4["p"], 0.045911), "%s vs %s" % (r3["p"], r4["p"]))
+        check("Cohen's d / Hedges' g 都给出",
+              close(r2["effect2"]["value"], -5.0 / 1.5811, 0.01) and
+              "g" in r2["effect2"], json.dumps(r2["effect2"], ensure_ascii=False))
+
+        r = stat_tools.stat_run_test("mannwhitney", groups=[[1, 2, 3], [4, 5, 6]])
+        check("Mann–Whitney：U 与精确 P", close(r["statistic"], 0.0) and close(r["p"], 0.1),
+              json.dumps({"U": r["statistic"], "p": r["p"]}))
+        r = stat_tools.stat_run_test("ttest_paired", x=[1, 2, 3, 4, 5], y=[2, 3, 4, 5, 7])
+        check("配对 t：均数差与 CI", close(r["effect"]["value"], -1.2, 0.001) and
+              len(r["effect"]["ci"]) == 2, json.dumps(r["effect"], ensure_ascii=False))
+        r = stat_tools.stat_run_test("wilcoxon", x=[1, 2, 3, 4, 5], y=[2, 3, 4, 5, 7])
+        check("Wilcoxon 符号秩可用", r["p"] is not None and r["statistic"] is not None)
+        r = stat_tools.stat_run_test("ttest_1samp", x=[5, 6, 7, 8, 9], mu=6)
+        check("单样本 t：与 μ₀ 之差",
+              close(r["effect"]["diff"], 1.0) and close(r["statistic"], 1.4142, 0.001),
+              json.dumps(r["statistic"]))
+        r = stat_tools.stat_run_test("wilcoxon_1samp", x=[5, 6, 7, 8, 9], mu=6)
+        check("单样本 Wilcoxon 可用", r["p"] is not None)
+        r = stat_tools.stat_run_test("anova", groups=[[1, 2, 3], [2, 3, 4], [3, 4, 5]])
+        check("ANOVA：F = 3.0、P = 0.125、η² = 0.5",
+              close(r["statistic"], 3.0) and close(r["p"], 0.125) and
+              close(r["effect"]["value"], 0.5), json.dumps(r["effect"], ensure_ascii=False))
+        r = stat_tools.stat_run_test("kruskal", groups=[[1, 2, 3], [2, 3, 4], [3, 4, 5]])
+        check("Kruskal–Wallis：H 与 P", close(r["statistic"], 3.9532) and
+              close(r["p"], 0.138538), json.dumps({"H": r["statistic"], "p": r["p"]}))
+        r = stat_tools.stat_run_test("levene", groups=[[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+        check("Levene：方差齐时不显著", close(r["p"], 1.0), str(r["p"]))
+        r = stat_tools.stat_run_test("pearson", x=[1, 2, 3], y=[2, 4, 6])
+        check("Pearson：完全线性 r = 1", close(r["statistic"], 1.0) and close(r["p"], 0.0),
+              json.dumps({"r": r["statistic"], "p": r["p"]}))
+        r = stat_tools.stat_run_test("spearman", x=[1, 2, 3, 4], y=[1, 4, 9, 16])
+        check("Spearman：单调 ρ = 1", close(r["statistic"], 1.0), str(r["statistic"]))
+        r = stat_tools.stat_run_test("kendall", x=[1, 2, 3], y=[1, 2, 3])
+        check("Kendall：τ = 1", close(r["statistic"], 1.0), str(r["statistic"]))
+        r = stat_tools.stat_run_test("chisq", table=[[10, 20], [30, 40]])
+        check("卡方：统计量/P/dof + Cramér's V",
+              close(r["statistic"], 0.446429) and close(r["p"], 0.504036) and r["df"] == 1 and
+              close(r["effect"]["value"], 0.066815, 0.001),
+              json.dumps({"chi2": r["statistic"], "p": r["p"], "v": r["effect"]["value"]}))
+        r = stat_tools.stat_run_test("fisher", table=[[3, 1], [1, 3]])
+        check("Fisher：OR = 9、P = 0.4857、OR 有 95%CI",
+              close(r["effect"]["value"], 9.0) and close(r["p"], 0.485714) and
+              len(r["effect"]["ci"]) == 2, json.dumps(r["effect"], ensure_ascii=False))
+        r = stat_tools.stat_run_test("binom_prop", successes=18, trials=30, p0=0.5)
+        check("二项检验：p̂ = 0.6、P = 0.3616",
+              close(r["effect"]["value"], 0.6) and close(r["p"], 0.36159),
+              json.dumps({"p": r["p"], "phat": r["effect"]["value"]}))
+
+        d = stat_tools.stat_describe([[1, 2, 3, 4, 5], [2, 4, 6, 8, 30]])
+        check("描述性统计：n/均数/SD/中位数(IQR)",
+              d["groups"][0]["n"] == 5 and close(d["groups"][0]["mean"], 3.0) and
+              close(d["groups"][0]["median"], 3.0) and len(d["groups"]) == 2)
+        check("描述性统计：正态性与方差齐性都在",
+              "normality" in d["groups"][0] and d["levene"] is not None,
+              json.dumps(d["levene"], ensure_ascii=False))
+        check("偏离正态会给出提示", any("Shapiro" in n for n in d["notes"]), str(d["notes"]))
+
+        e = stat_tools.stat_effect_ci("welch", groups=[[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]])
+        check("效应量与 CI（复用同一次计算）",
+              close(e["effect"]["value"], -5.0) and "95%CI" in e["text"], e["text"])
+
+        for kind, kwargs, want in (("two_means", {"d": 0.5}, 63),
+                                   ("two_props", {"p1": 0.30, "p2": 0.15}, 121),
+                                   ("one_mean", {"sd": 12, "delta": 5}, 46),
+                                   ("correlation", {"r": 0.30}, 85)):
+            s = stat_tools.stat_sample_size(kind, **kwargs)
+            check("样本量估算 %s → n≈%d" % (kind, want), s["n"] == want,
+                  json.dumps(s, ensure_ascii=False)[:160])
+
+        for method, want in (("bonferroni", [0.03, 0.12, 0.09]),
+                             ("holm", [0.03, 0.06, 0.06]),
+                             ("fdr_bh", [0.03, 0.04, 0.04])):
+            c = stat_tools.stat_correct_pvalues([0.01, 0.04, 0.03], method)
+            got = [round(x["p_adj"], 4) for x in c["rows"]]
+            check("多重比较校正 %s" % method, got == want, str(got))
+        c = stat_tools.stat_correct_pvalues([0.01, 0.04, 0.03], "holm", alpha=0.05)
+        check("校正结果给出显著计数与结论句",
+              c["kept"] == 1 and "校正后" in c["sentence"], json.dumps(c, ensure_ascii=False)[:160])
+
+        print("\n[8b] 计算的落库 / 写稿 / 错误处理")
+        stat_key = stat_data.STAGES[5]["key"]                 # 检验计算
+        code, body = post(base + "/api/stat/run", {
+            "project": "测试课题", "page": "stat", "key": stat_key,
+            "action": "test", "kind": "welch",
+            "groups": ["1 2 3 4 5", "6 7 8 9 10"], "alpha": 0.05})
+        j = json.loads(body)
+        check("POST /api/stat/run 跑通假设检验",
+              code == 200 and j.get("ok") and close(j["result"]["statistic"], -5.0),
+              body[:200])
+        calc = (j.get("scope", {}).get("node", {}) or {}).get("calc") or []
+        check("计算自动记入环节（calc 记录）",
+              len(calc) == 1 and calc[0]["kind"] == "welch" and bool(calc[0]["ts"]),
+              json.dumps(calc, ensure_ascii=False)[:200])
+        check("计算记录写入项目文件",
+              len(json.load(open(os.path.join(tmp, "测试课题.json"),
+                                 encoding="utf-8"))["stat"][stat_key].get("calc") or []) == 1)
+        digest = coupling.project_digest(web_proj := web_server.resolve_project("测试课题"))
+        check("计算结果进入素材摘要（模型能引用真实数字）",
+              "本地计算结果" in digest and "差异有统计学意义" in digest,
+              [ln for ln in digest.splitlines() if "本地计算结果" in ln][:1])
+
+        code, body = post(base + "/api/stat/run", {
+            "project": "测试课题", "page": "stat", "key": stat_key,
+            "action": "test", "kind": "anorak", "groups": ["1 2", "3 4"]})
+        check("未知检验类型返回 400 + 中文提示",
+              code == 400 and "未知的检验类型" in json.loads(body)["error"], body[:200])
+        code, body = post(base + "/api/stat/run", {
+            "project": "测试课题", "page": "stat", "key": stat_key,
+            "action": "test", "kind": "welch", "groups": ["1 2", "3 4"]})
+        check("样本太少返回 400", code == 400 and "至少" in json.loads(body)["error"],
+              body[:200])
+        code, body = post(base + "/api/stat/run", {
+            "project": "测试课题", "page": "stat", "key": stat_key,
+            "action": "test", "kind": "welch", "groups": ["1 2 a", "3 4 5"]})
+        check("非数字返回 400", code == 400 and "无法解析" in json.loads(body)["error"],
+              body[:200])
+        code, body = post(base + "/api/stat/run", {
+            "project": "测试课题", "page": "stat", "key": stat_key,
+            "action": "test", "kind": "fisher", "table": [["1", "2"], ["3", "4"]]})
+        check("2×2 表可用（Fisher）", code == 200 and json.loads(body)["ok"], body[:200])
+        code, body, _ = get(base + "/api/scope?page=stat&key=" + stat_key)
+        n_calc = len(json.loads(body)["node"].get("calc") or [])
+        check("两种计算各留下一条记录", n_calc == 2, "记录数=%s" % n_calc)
+
+        for action, extra in (("effect", {"kind": "welch", "groups": ["1 2 3 4 5",
+                                                                     "6 7 8 9 10"]}),
+                              ("sample_size", {"kind": "two_means", "d": 0.5}),
+                              ("correct", {"pvals": "0.01 0.04 0.03", "method": "fdr_bh"}),
+                              ("describe", {"groups": ["1 2 3 4 5", "2 4 6 8 30"]})):
+            payload = {"project": "测试课题", "page": "stat", "key": stat_key,
+                       "action": action, "save": False}
+            payload.update(extra)
+            code, body = post(base + "/api/stat/run", payload)
+            check("计算动作 %s 可用（save=false 不记录）" % action,
+                  code == 200 and json.loads(body)["ok"], body[:200])
+        code, body, _ = get(base + "/api/scope?page=stat&key=" + stat_key)
+        check("save=false 的四次试算都没写入记录",
+              len(json.loads(body)["node"].get("calc") or []) == n_calc,
+              "记录数=%s" % len(json.loads(body)["node"].get("calc") or []))
+
+        sentence = "Welch t = -5.000，P = 0.0011（本例用于验证写入）"
+        code, body = post(base + "/api/stat/apply",
+                          {"project": "测试课题", "page": "stat", "key": stat_key,
+                           "text": sentence, "target": "draft"})
+        j = json.loads(body)
+        check("计算结论写入草稿",
+              code == 200 and sentence in (j["scope"]["node"].get("draft") or ""),
+              (j["scope"]["node"].get("draft") or "")[:120])
+        code, body = post(base + "/api/stat/apply",
+                          {"project": "测试课题", "page": "stat", "key": stat_key,
+                           "index": 0, "target": "final"})
+        j = json.loads(body)
+        check("按记录序号写入定稿并把环节标为已完成",
+              code == 200 and "差异有统计学意义" in (j["scope"]["node"].get("final") or "")
+              and j["scope"]["state"] == "done",
+              json.dumps(j["scope"]["node"].get("final"), ensure_ascii=False)[:160])
+        code, body = post(base + "/api/stat/apply",
+                          {"project": "测试课题", "page": "stat", "key": stat_key,
+                           "remove": 0})
+        check("删除一条计算记录后还剩一条",
+              code == 200 and len(json.loads(body)["scope"]["node"].get("calc") or []) ==
+              n_calc - 1,
+              str(len(json.loads(body)["scope"]["node"].get("calc") or [])))
+        code, body = post(base + "/api/stat/apply",
+                          {"project": "测试课题", "page": "stat", "key": stat_key,
+                           "clear": True})
+        check("清空计算记录",
+              code == 200 and (json.loads(body)["scope"]["node"].get("calc") or []) == [],
+              body[:160])
+        code, body = post(base + "/api/stat/apply",
+                          {"project": "测试课题", "page": "stat", "key": stat_key})
+        check("没有可写入内容时返回 400", code == 400, body[:160])
+
+        # ---------------------------------------------------------- 10 离线/兼容
+        print("\n[9] 离线可用性与 Python 3.8 兼容")
         files = ["web_server.py", "web/index.html", "web/app.css", "web/app.js",
                  "启动_Web版.bat"]
         missing = [f for f in files if not os.path.exists(os.path.join(HERE, f))]
@@ -779,7 +1003,8 @@ def main() -> int:
                        and n.names[0].name.split(".")[0] not in stdlib
                        and n.names[0].name.split(".")[0] not in
                        ("app_paths", "coupling", "scope_core", "shape_data", "stat_data",
-                        "design_agent", "llm_client", "stages_data", "docx_export")]
+                        "design_agent", "llm_client", "stages_data", "docx_export",
+                        "stat_tools")]
         check("web_server.py 只依赖标准库 + 本项目模块", not bad_imports, str(bad_imports))
 
         # 追问解析的两种写法（编号 / 未编号）都必须是 2 条，不能被并成 1 条

@@ -40,6 +40,13 @@ ROOT = os.path.abspath(os.getcwd())
 APP_NAME = "PCLRadiomicsWeb"
 ICON = "logo_icon.ico" if os.path.exists(os.path.join(ROOT, "logo_icon.ico")) else None
 
+# 是否把 numpy/scipy（统计页的"真实计算"）一起打进去：
+#   默认不打 —— exe 约 22 MB，界面功能齐全；点「运行」时计算面板会明确提示
+#   "本产物未内置 numpy/scipy"，并说明怎么补（源码运行或带 PCL_WEB_WITH_SCIPY 重新打包）。
+#   置 PCL_WEB_WITH_SCIPY=1 则连计算层一起打：体积取决于 BLAS ——
+#   自带 OpenBLAS 的 PyPI wheel 约 +45 MB，conda 的 MKL 版会到 +200 MB 以上。
+WITH_SCIPY = os.environ.get("PCL_WEB_WITH_SCIPY", "") == "1"
+
 datas = [("web", "web")]                 # 界面资源：index.html / app.css / app.js / favicon
 try:
     datas += collect_data_files("certifi")      # HTTPS 根证书（连模型 API 用）
@@ -52,7 +59,7 @@ def _extra_dlls():
     少了它们，冻结后会依次报：
         ImportError: DLL load failed while importing _ssl       （连 HTTPS 都起不来）
         ImportError: DLL load failed while importing etree      （python-docx 导出 Word 失败）
-    这里把 ssl / 压缩 / libxml2 一族真正依赖的 DLL 显式带上。
+    这里把 ssl / 压缩 / libxml2 一族真正依赖的 DLL 显式带上；带 numpy/scipy 时再补 BLAS。
     （依赖是用 _list_pe_deps.py 逐个 PE 解析出来的，不是猜的。）"""
     out, seen = [], set()
     roots = [sys.prefix, sys.base_prefix,
@@ -64,6 +71,12 @@ def _extra_dlls():
                 "libbz2*.dll", "liblzma*.dll", "zlib*.dll",
                 "libxml2*.dll", "libxslt*.dll", "libexslt*.dll",
                 "iconv*.dll", "charset*.dll")
+    if WITH_SCIPY:
+        # 只兜 conda 版需要的那个 OpenMP 运行库：其余 BLAS/MKL 交给 PyInstaller 顺着
+        # 导入表自己找（下面把 Library\bin 加进搜索路径）。
+        # 注意别再手动收 libopenblas —— numpy/scipy 的 wheel 各自带一份（各 ~34 MB），
+        # 手动再收一份会让产物多出几十 MB。
+        patterns += ("libiomp5md.dll",)
     for root in roots:
         if not root or not os.path.isdir(root):
             continue
@@ -76,6 +89,16 @@ def _extra_dlls():
     return out
 
 
+# conda 版把 OpenSSL / MKL / OpenBLAS 都放在 Library\bin：把它加进搜索路径后，
+# PyInstaller 才能顺着二进制的导入表把**真正用到**的 DLL 找齐（而不是一次性全打包）。
+for _extra in (os.path.join(sys.base_prefix, "Library", "bin"),
+               os.path.join(sys.prefix, "Library", "bin"),
+               os.path.join(sys.base_prefix, "DLLs"),
+               os.path.join(sys.prefix, "DLLs")):
+    if _extra and os.path.isdir(_extra) and _extra not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _extra + os.pathsep + os.environ.get("PATH", "")
+
+
 binaries = _extra_dlls()
 if binaries:
     print("  附带的运行库 DLL：%s" % "、".join(sorted(os.path.basename(b[0])
@@ -83,6 +106,24 @@ if binaries:
 
 HIDDEN = ["app_paths", "llm_client", "design_agent", "stages_data", "stat_data",
           "shape_data", "scope_core", "coupling", "docx_export", "web_server"]
+if WITH_SCIPY:
+    HIDDEN += ["stat_tools", "numpy", "scipy", "scipy.stats"]
+
+# 排除整条 Qt / 桌面界面链路：既减小体积，也避免把 Win7 上跑不起来的东西带进去
+EXCLUDES = ["tkinter", "matplotlib", "IPython", "notebook", "pandas", "PIL", "Pillow",
+            "PySide6", "shiboken6", "PyCt6",
+            "design_studio", "omics_pipeline", "ui_kit", "win_stdio",
+            "mcp", "mcp_server", "api_server", "cli"]
+if not WITH_SCIPY:
+    # 不带计算层时把 numpy/scipy/MKL 整条链路排掉（体积从 ~190 MB 降回 ~22 MB）。
+    # 注意：stat_tools 本身**不能**排除 —— web_server 会 import 它，
+    # 它对 numpy/scipy 是惰性导入，没有计算层时 available() 返回 ok=false，
+    # 界面据此给出"本产物未内置计算层"的提示。
+    EXCLUDES += ["numpy", "scipy", "mkl", "mkl_rt", "mkl_fft", "mkl_random"]
+else:
+    # 带计算层时把用不到的测试包与 f2py/distutils 排掉，省几十 MB
+    EXCLUDES += ["numpy.tests", "scipy.tests", "numpy.f2py", "numpy.distutils",
+                 "scipy.datasets", "scipy.misc"]
 
 a = Analysis(
     ["web_server.py"],
@@ -92,11 +133,7 @@ a = Analysis(
     hiddenimports=HIDDEN,
     hookspath=[],
     runtime_hooks=[],
-    # 排除整条 Qt / 桌面界面链路：既减小体积，也避免把 Win7 上跑不起来的东西带进去
-    excludes=["tkinter", "matplotlib", "IPython", "notebook", "pandas", "PIL", "Pillow",
-              "mkl", "mkl_rt", "PySide6", "shiboken6", "PyCt6",
-              "design_studio", "omics_pipeline", "ui_kit", "win_stdio",
-              "mcp", "mcp_server", "api_server", "cli"],
+    excludes=EXCLUDES,
     noarchive=False,
 )
 
@@ -118,6 +155,8 @@ exe_one = EXE(pyz, a.scripts, a.binaries, a.datas, [],
 print("")
 print("=" * 68)
 print("  已构建 %s（Web 版：本地服务 + 系统浏览器界面，无需 Qt）" % APP_NAME)
+print("  统计计算（numpy/scipy）：%s" % ("已内置" if WITH_SCIPY
+                                       else "未内置（默认；置 PCL_WEB_WITH_SCIPY=1 可带上）"))
 print("  构建用 Python：%s" % sys.version.split()[0]
       + ("   ← 非 3.8：产物在 Win7 上仍会因 api-ms-win-core-path 报错"
          if sys.version_info[:2] != (3, 8) else
