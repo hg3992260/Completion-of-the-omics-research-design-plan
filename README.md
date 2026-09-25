@@ -14,8 +14,24 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v1.1.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v1.1.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+### v1.1.1 · Windows 7 支持说明 + 仅 API 构建
+
+- **澄清系统要求**：图形界面（`design_studio` / `omics_pipeline` / 合并版 exe）最低 **Windows 10 / 11（64 位）**。
+  构建用的 Python 3.9+ 与界面依赖的 Qt 6（PySide6 6.x）**都不支持 Windows 7**，这是两条独立的硬约束。
+- **定位常见报错**：在 Win7 上运行编译产物会报「计算机中丢失 `api-ms-win-core-path-l1-1-0.dll`」——
+  该 DLL 是 Win8+ 才有的 API set，而 Python 3.9+ 的 `python3XX.dll` 会直接导入它；报错发生在加载阶段，
+  程序内无法拦截。**单独补这个 DLL 也无法解决** GUI（Qt 6 仍起不来）。
+- **新增 `_check_win_target.py`**：构建目标自检。不带参数报告当前工具链的最低 Windows 要求；
+  给定 `.exe/.dll` 时解析 PE 导入表并列出 Win8+/Win10+ 专有 API set。实测：`python311.dll` 命中
+  `api-ms-win-core-path-l1-1-0.dll`，`python38.dll` 干净。
+- **新增 `pclradiomics_api_win7.spec` + `编译_Win7_API版.bat`**：用 **Python 3.8** 打包「仅推理 API」
+  （`api_server.py`，无 Qt；`excludes` 掉 PySide6 / shiboken6 / PyCt6 / mcp / docx 整条链路），
+  让 Win7 机器可以作为 OpenAI 兼容服务端被其他机器调用。脚本会校验解释器必须是 3.8、缺依赖时自动安装
+  （`pyinstaller==6.10` + `certifi`），并在构建后自动跑上面的自检。
+  Win7 目标机前置：**SP1(x64) + KB2533623 + KB2999226(UCRT) + VC++ 2015-2019 运行库(x64)**。
 
 ### v1.1.0 · 四个视图的统一工作台
 

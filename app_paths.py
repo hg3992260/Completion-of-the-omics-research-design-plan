@@ -17,7 +17,7 @@ import sys
 
 APP_NAME = "PCLRadiomics"
 # 发布版本：与 git tag / GitHub Release 保持一致
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 def is_frozen() -> bool:
