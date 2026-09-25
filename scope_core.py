@@ -7,6 +7,8 @@
     {"<环节 key>": {"checks": {"0": true, ...}}}
 """
 
+from __future__ import annotations
+
 STATUS_LABEL = {"todo": "未开始", "doing": "进行中", "done": "已完成",
                 "asked": "已追问", "drafted": "待采纳", "final": "已定稿"}
 

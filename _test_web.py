@@ -707,16 +707,48 @@ def main() -> int:
             if os.path.exists(cand):
                 py38 = cand
                 break
+        # 用真机上的 3.8 解释器再验一遍（有就跑，没有就跳过）
+        py38 = None
+        for cand in (r"D:\python\envs\seq\python.exe", r"D:\python\envs\dicom\python.exe"):
+            if os.path.exists(cand):
+                py38 = cand
+                break
         if py38:
             import subprocess
-            r = subprocess.run([py38, "-c",
-                                "import py_compile,sys;"
-                                "py_compile.compile(r'%s', doraise=True);"
-                                "print(sys.version.split()[0])"
-                                % os.path.join(HERE, "web_server.py")],
-                               capture_output=True, text=True)
-            check("Python 3.8 实际编译通过（%s）" % py38,
-                  r.returncode == 0, (r.stdout + r.stderr)[:300])
+            env38 = dict(os.environ, PYTHONIOENCODING="utf-8")
+
+            def run38(args):
+                r = subprocess.run([py38] + args, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", cwd=HERE, env=env38)
+                return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+            code0, out0 = run38(["-c", "import py_compile,sys;"
+                                 "py_compile.compile(r'%s', doraise=True);"
+                                 "print(sys.version.split()[0])"
+                                 % os.path.join(HERE, "web_server.py")])
+            check("Python 3.8 实际编译通过（%s）" % py38, code0 == 0, out0[:300])
+
+            # ★ 光"能编译"不够：PEP 585/604 注解（list[x] / X | None）在 3.8 上是**导入时**求值，
+            #   缺 `from __future__ import annotations` 会在 import 阶段直接 TypeError，
+            #   而 py_compile 只查语法、查不出来 —— 所以再真 import 一遍全部模块。
+            script = (
+                "import importlib\n"
+                "mods = ['app_paths', 'llm_client', 'design_agent', 'stages_data',\n"
+                "        'stat_data', 'shape_data', 'scope_core', 'coupling', 'web_server']\n"
+                "for m in mods:\n"
+                "    importlib.import_module(m)\n"
+                "extra = ''\n"
+                "try:\n"
+                "    import docx, docx_export\n"
+                "    extra = ' + docx_export'\n"
+                "except Exception as e:\n"
+                "    extra = ' (skip docx_export: %s)' % type(e).__name__\n"
+                "print('OK', len(mods), extra)\n")
+            code1, out1 = run38(["-c", script])
+            check("Python 3.8 能真正 import 全部模块（注解在导入时求值）",
+                  code1 == 0, out1[-400:])
+            code2, out2 = run38([os.path.join(HERE, "_check_py38_annotations.py")])
+            check("没有模块用 3.8 不支持的注解写法", code2 == 0, out2[-300:])
         else:
             print("  –　跳过：本机没有 Python 3.8 解释器")
     finally:

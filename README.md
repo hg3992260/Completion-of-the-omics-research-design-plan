@@ -8,6 +8,7 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 | **`design_studio.py`** | **主界面（桌面版）**：贴入初步实验设计 → LLM agent 按十阶段逐段追问与改写 → 输出可执行研究设计 | `启动_设计工作台.bat` |
 | `omics_pipeline.py` | 管线视图：十阶段检查表、评分与自评进度 | `启动.bat` |
 | **`web_server.py`** | **Web 版**：本地服务 + 浏览器界面，**Windows 7 上也能用**（无需 Qt）；四个视图都能编辑 | `启动_Web版.bat` |
+| `pclradiomics_web_win7.spec` | **Web 版打包成 exe**（Win7 目标机不用装 Python） | `编译_Win7_Web版.bat` |
 
 ![设计工作台](_shots/studio_01_draft_dark.png)
 
@@ -18,12 +19,13 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 **当前版本：`v1.1.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
 
-> **开发中（未发布）**：**Web 版 Phase 0 / 1 / 2** —— `web_server.py` + `web/`，本地服务 + 浏览器界面，
-> 让 Windows 7 也能用上完整界面（Qt 6 与 WebView2 都不支持 Win7）。
+> **开发中（未发布）**：**Web 版 Phase 0 / 1 / 2 + Win7 exe 打包** —— `web_server.py` + `web/`，
+> 本地服务 + 浏览器界面，让 Windows 7 也能用上完整界面（Qt 6 与 WebView2 都不支持 Win7）。
 > Phase 0 打通四个视图与收敛推理；Phase 1 把**工作台**做成可编辑闭环
 > （研究设想 → 追问 → 回答 → 改写 → 采纳 → 汇总草案 → 导出 Markdown / Word）；
 > Phase 2 把**统计九阶段与 SCI 七章**做成「结构内容 ⇄ 引导完善」两模式
-> （追问 → 回答 → 定稿 → 采纳，采纳时按模型检查表**自动勾选自检项**，也可自己勾）。
+> （追问 → 回答 → 定稿 → 采纳，采纳时按模型检查表**自动勾选自检项**，也可自己勾）；
+> 另外提供 `编译_Win7_Web版.bat`：用 Python 3.8 打一个 **Win7 上双击即用、不用装 Python** 的 exe。
 > 见「八、Web 版」。
 
 ### v1.1.1 · Windows 7 支持说明 + 仅 API 构建
@@ -81,7 +83,7 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 | 用途 | 最低系统 | 原因 |
 |---|---|---|
 | **图形界面（桌面版）**（`design_studio.py` / `omics_pipeline.py` / 合并版 exe） | **Windows 10 / 11（64 位）** | 界面基于 PySide6 6.x（**Qt 6 不支持 Windows 7**）；构建用的 Python ≥ 3.9 也已放弃 Win7 |
-| **Web 版**（`web_server.py` + 浏览器） | **Windows 7 SP1** 可行 | 无 Qt 依赖，纯标准库服务 + 系统浏览器；用 **Python 3.8** 即可（见下） |
+| **Web 版**（`web_server.py` + 浏览器，或打包好的 `PCLRadiomicsWeb.exe`） | **Windows 7 SP1** 可行 | 无 Qt 依赖，纯标准库服务 + 系统浏览器；用 **Python 3.8** 即可（见下） |
 | **推理 API**（`api_server.py`） | Windows 7 **SP1** 可行 | 无 Qt 依赖；用 **Python 3.8** 构建即可（见下） |
 | **MCP 服务**（`mcp_server.py`） | 取决于 `mcp` 包的 Python 下限 | 一般要求 ≥ 3.10 |
 | macOS | macOS 11+ | PySide6 6.x 要求 |
@@ -109,8 +111,12 @@ python _check_win_target.py <某个 Python 3.8 环境的>\python38.dll
 
 ### 目标机是 Windows 7 时怎么做
 
-1. **要图形界面**：用 **Web 版**（`启动_Web版.bat`）—— 本机起一个 127.0.0.1 的服务，
-   用系统里已有的浏览器当界面，**完全不需要 Qt**，Python 3.8 即可。详见「八、Web 版」。
+1. **要图形界面（推荐）**：用 **Web 版**——本机起一个 127.0.0.1 的服务，用系统里已有的浏览器当界面，
+   **完全不需要 Qt**。两种用法：
+   - 目标机已装 Python 3.8（或更高）：直接用 **`启动_Web版.bat`**（源码运行）；
+   - 目标机不想装 Python：用 **`编译_Win7_Web版.bat`** 打一个 exe 拷过去，**双击即用**
+     （产物 `dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe`，约 18 MB，含界面与 Word 导出）。
+   两种用法的界面、功能、数据格式完全一致。详见「八、Web 版」。
 2. **只需要推理 API**（把 Win7 机器当作 OpenAI 兼容服务端，供其他客户端调用）：
    运行 **`编译_Win7_API版.bat`** —— 用 Python 3.8 打包 `api_server.py`，
    **不含 Qt**，并在 spec 里排除 `PySide6 / shiboken6 / PyCt6 / mcp / docx` 整条链路。
@@ -122,8 +128,8 @@ python _check_win_target.py <某个 Python 3.8 环境的>\python38.dll
 4. 任何构建完成后都建议自检一次：
 
    ```bat
-   python _check_win_target.py dist\PCLRadiomicsAPI\PCLRadiomicsAPI.exe
-   :: ✓ 未发现 Win8+/Win10+ 专有 API set  → 该产物可以在 Win7 上跑
+   python _check_win_target.py dist-web\PCLRadiomicsWeb\_internal\python38.dll
+   python _test_web_exe.py          :: 起真 exe，验接口 / 静态资源 / SSE / Word 导出 / 浏览器渲染
    ```
 
 ### 为什么 Win7 上"内嵌浏览器"走不通，只能用系统浏览器
@@ -634,6 +640,9 @@ git push -u origin main
 | `web_server.py` | **Web 版内核**：纯标准库本地服务（Python 3.8 兼容），把项目 / 十阶段工作台 / 统计与 SCI 的 scope 引导 / 收敛推理 / 导出以 HTTP + SSE 暴露给浏览器；无 Qt 依赖 |
 | `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），四个视图（工作台 + 两个 scope 页可编辑）+ 流程条 + 流式输出；**无任何外链资源**，离线可用 |
 | `启动_Web版.bat` | Web 版一键启动：找 Python（3.8 起）→ 起服务 → 优先用 Chrome/Edge/Firefox 打开界面 |
+| `pclradiomics_web_win7.spec` / `编译_Win7_Web版.bat` | **Web 版打包成 exe**（Python 3.8，无 Qt）：产出文件夹版与单文件版，并显式带上 OpenSSL / libxml2 一族 DLL；构建后自动跑 PE 兼容检查与端到端自检 |
+| `_test_web_exe.py` | **打包产物自检**：起真 exe，验内置 web 资源、接口、exe 同级落盘、SSE 通路、Word 导出、真实浏览器渲染 |
+| `_check_py38_annotations.py` / `_list_pe_deps.py` | 辅助脚本：前者扫"3.8 上会在导入时炸的注解写法"，后者列出 PE 的真实 DLL 依赖（用来定位冻结后缺哪个运行库） |
 | `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
 
 数据与界面完全分离：`stages_data.py` 换内容，`design_agent.py` 换提示词，UI 不用改。
@@ -701,10 +710,47 @@ Word 导出走 `docx_export`。因此代码里同样**没有任何章节↔阶�
 而不是靠代码写死"这一环节该看哪几条"。四个页面编辑的是**同一个项目文件** ——
 与桌面版共用，**同一课题请勿两端同时编辑**。
 
+### 8.1 打包成 exe（Windows 7 目标机不用装 Python）
+
 ```bat
-:: Web 版自检：124 项（接口 / 静态资源 / 目录穿越 / SSE 推理 / 工作台闭环 / scope 闭环 /
-::             导出 / 自检勾选 / 项目管理 / 离线无外链 / Python 3.8 兼容）
+:: 双击即可（自动找 Python 3.8 → 装依赖 → 打包 → 跑自检）
+编译_Win7_Web版.bat
+
+:: 等价于
+py -3.8 -m pip install "pyinstaller==6.10" certifi python-docx
+py -3.8 -m PyInstaller --noconfirm --clean --distpath dist-web --workpath build-web ^
+        pclradiomics_web_win7.spec
+```
+
+| 产物 | 体积 | 说明 |
+|---|---|---|
+| `dist-web\PCLRadiomicsWeb\PCLRadiomicsWeb.exe` | 目录约 18 MB | **推荐**：启动快、不解包、便于整目录拷走 |
+| `dist-web\PCLRadiomicsWeb.exe` | 单文件约 10 MB | 便于传输；启动稍慢（每次解包到临时目录） |
+
+产物里**已经包含**：Python 3.8 运行时、界面（`web/`）、`certifi` 根证书（连模型 API 用）、
+`python-docx` + `lxml`（导出 Word）、以及 OpenSSL / libxml2 一族 DLL。
+拷到 Win7 后双击 exe：本机起服务并自动用 Chrome/Edge/Firefox 打开界面；
+数据（`projects\`、`llm_config.json`）写在 **exe 同级目录**，绿色便携、可整体搬走。
+
+> 打包踩过的两个坑（都写进 spec 了）：conda 版 Python 把 OpenSSL / libxml2 放在
+> `Library\bin`，PyInstaller 默认收不到 —— 冻结后会依次报
+> `DLL load failed while importing _ssl`（连 HTTPS 都起不来）与
+> `... while importing etree`（Word 导出失败）。spec 里用 `_list_pe_deps.py`
+> 逐个 PE 解析出真实依赖后显式带上。
+>
+> 另一个坑更隐蔽：`scope_core.py` 用了 `list[tuple[int, bool]]` 这种注解却**没有**
+> `from __future__ import annotations` —— Python 3.8 上会在**导入时**直接
+> `TypeError: 'type' object is not subscriptable`，而 `py_compile` 只查语法、查不出来。
+> 所以自检里加了"用 3.8 真 import 一遍全部模块"（`_check_py38_annotations.py`）。
+
+```bat
+:: Web 版自检：126 项（接口 / 静态资源 / 目录穿越 / SSE 推理 / 工作台闭环 / scope 闭环 /
+::             导出 / 自检勾选 / 项目管理 / 离线无外链 / Python 3.8 真 import）
 python _test_web.py
+
+:: 打包产物自检：起真 exe，验内置资源、接口、落盘、SSE 通路、Word 导出与浏览器渲染（18 项）
+python _test_web_exe.py
+python _test_web_exe.py --exe dist-web\PCLRadiomicsWeb.exe      :: 验单文件版
 
 :: 渲染与交互核对：造演示项目 → 起服务 → 无头 Chrome 截图 10 张 + 渲染后 DOM 判定 30 项
 ::               + 真实点击跑一遍闭环 10 项（追问 / 速读串联 / 改写 / 采纳 / 汇总 /
@@ -743,8 +789,11 @@ D:\python\envs\mar\python.exe _check_overlap.py
 :: 主题一致性：浅色 → 深色 → 浅色，逐控件查冻结色与"前景=背景"，并做像素级对比度验收
 D:\python\envs\mar\python.exe _check_theme.py
 
-:: Web 版：124 项自检（接口 / 静态资源 / SSE 推理 / 工作台与 scope 闭环 / 导出 / 勾选 / 离线无外链）
+:: Web 版：126 项自检（接口 / 静态资源 / SSE 推理 / 工作台与 scope 闭环 / 导出 / 勾选 / 离线无外链 / 3.8 真 import）
 D:\python\envs\mar\python.exe _test_web.py
+
+:: Web 版打包产物：起真 exe 验内置资源 / 接口 / 落盘 / SSE / Word 导出 / 浏览器渲染（18 项）
+D:\python\envs\mar\python.exe _test_web_exe.py
 
 :: Web 版：真实浏览器渲染 + 交互核对（截图 10 张、DOM 判定 30 项、真实点击 10 项）
 D:\python\envs\mar\python.exe _probe_web.py

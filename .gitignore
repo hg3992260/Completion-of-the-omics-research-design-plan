@@ -12,6 +12,8 @@ build/
 dist/
 dist_onefile/
 build_onefile/
+dist-web/
+build-web/
 *.manifest
 
 # 自检/调试输出（脚本本身保留，输出不入库）

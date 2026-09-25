@@ -20,6 +20,8 @@
     note            补充说明
 """
 
+from __future__ import annotations
+
 import scope_core
 
 STATUS_LABEL = scope_core.STATUS_LABEL
