@@ -7,7 +7,7 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 |---|---|---|
 | **`design_studio.py`** | **主界面（桌面版）**：贴入初步实验设计 → LLM agent 按十阶段逐段追问与改写 → 输出可执行研究设计 | `启动_设计工作台.bat` |
 | `omics_pipeline.py` | 管线视图：十阶段检查表、评分与自评进度 | `启动.bat` |
-| **`web_server.py`** | **Web 版**：本地服务 + 浏览器界面，**Windows 7 上也能用**（无需 Qt）；工作台已可编辑 | `启动_Web版.bat` |
+| **`web_server.py`** | **Web 版**：本地服务 + 浏览器界面，**Windows 7 上也能用**（无需 Qt）；四个视图都能编辑 | `启动_Web版.bat` |
 
 ![设计工作台](_shots/studio_01_draft_dark.png)
 
@@ -18,10 +18,13 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 **当前版本：`v1.1.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
 
-> **开发中（未发布）**：**Web 版 Phase 0 / Phase 1** —— `web_server.py` + `web/`，本地服务 + 浏览器界面，
+> **开发中（未发布）**：**Web 版 Phase 0 / 1 / 2** —— `web_server.py` + `web/`，本地服务 + 浏览器界面，
 > 让 Windows 7 也能用上完整界面（Qt 6 与 WebView2 都不支持 Win7）。
 > Phase 0 打通四个视图与收敛推理；Phase 1 把**工作台**做成可编辑闭环
-> （研究设想 → 追问 → 回答 → 改写 → 采纳 → 汇总草案 → 导出 Markdown / Word）。见「八、Web 版」。
+> （研究设想 → 追问 → 回答 → 改写 → 采纳 → 汇总草案 → 导出 Markdown / Word）；
+> Phase 2 把**统计九阶段与 SCI 七章**做成「结构内容 ⇄ 引导完善」两模式
+> （追问 → 回答 → 定稿 → 采纳，采纳时按模型检查表**自动勾选自检项**，也可自己勾）。
+> 见「八、Web 版」。
 
 ### v1.1.1 · Windows 7 支持说明 + 仅 API 构建
 
@@ -628,8 +631,8 @@ git push -u origin main
 | `projects/` | 课题项目存档（JSON，自动保存） |
 | `llm_config.json` | 非敏感配置（模型、温度、预算）；密钥仅在手工填写时写入 |
 | `启动_设计工作台.bat` / `启动.bat` | 一键启动（自动选用已装 PyCt6 的解释器） |
-| `web_server.py` | **Web 版内核**：纯标准库本地服务（Python 3.8 兼容），把项目 / 十阶段工作台 / 收敛推理 / 导出以 HTTP + SSE 暴露给浏览器；无 Qt 依赖 |
-| `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），工作台可编辑闭环 + 四个视图 + 流程条 + 流式输出；**无任何外链资源**，离线可用 |
+| `web_server.py` | **Web 版内核**：纯标准库本地服务（Python 3.8 兼容），把项目 / 十阶段工作台 / 统计与 SCI 的 scope 引导 / 收敛推理 / 导出以 HTTP + SSE 暴露给浏览器；无 Qt 依赖 |
+| `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），四个视图（工作台 + 两个 scope 页可编辑）+ 流程条 + 流式输出；**无任何外链资源**，离线可用 |
 | `启动_Web版.bat` | Web 版一键启动：找 Python（3.8 起）→ 起服务 → 优先用 Chrome/Edge/Firefox 打开界面 |
 | `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
 
@@ -658,14 +661,18 @@ python web_server.py --browser "C:\Program Files\Mozilla Firefox\firefox.exe"
 | `GET /` | 单页界面（四个视图：工作台 / 统计 / SCI 结构 / 总览） |
 | `GET /api/health` | 健康检查：版本、Python、模型、密钥（脱敏） |
 | `GET /api/state[?project=…]` | 整份界面状态：项目列表、十阶段**完整内容**（追问/回答/稿子/检查表）、三条工作线、九阶段与七章状态、收敛结论 |
+| `GET /api/scope?page=&key=` | 一个 scope 环节的完整内容（结构内容模式：要点/示例/公式/陷阱/输出/工具/速查表，或通用模型/内容边界/语言时态/词块组）+ 当前状态、自检勾选与模型判定 |
 | `GET /api/export?fmt=md` | 导出 Markdown（**零依赖**）／ `fmt=docx` 导出 Word（需要 `python-docx`）→ 浏览器下载 |
 | `POST /api/project/new` / `rename` / `delete` | 项目管理（复用桌面版同一套 `Project` 代码与落盘格式） |
 | `POST /api/kickoff` | 速读研究设想：写入原始设想，给出速读与 3 条首要关注点（SSE 流式，结果记入对话记录） |
-| `POST /api/stage/ask` | **追问**：现状评估 + 必须澄清的问题（SSE 流式） |
+| `POST /api/stage/ask` | **十阶段追问**：现状评估 + 必须澄清的问题（SSE 流式） |
 | `POST /api/stage/answers` | 只保存研究者的回答（不调用模型） |
 | `POST /api/stage/rewrite` | **改写稿** + 检查表 + 风险提示 + 下一步（SSE 流式；会先把回答落盘再改写） |
 | `POST /api/stage/save` | 保存编辑（定稿框 / 草稿框 / 研究设想）或**采纳定稿**（`accept: true`） |
 | `POST /api/finalize` | 把各阶段定稿**汇总成完整设计草案** + 待补数据清单 + 投稿前自查（SSE 流式） |
+| `POST /api/scope/ask` | **scope 环节追问**：带着本环节规范内容与项目全量素材（SSE 流式） |
+| `POST /api/scope/rewrite` | **scope 定稿** + 检查表判定（SSE 流式，回传每条自检项的满足情况） |
+| `POST /api/scope/answers` / `save` | 只保存回答／保存编辑、勾选自检（`set_check` / `set_all`）、**采纳定稿并自动勾选**（`accept`） |
 | `POST /api/convergence` | **收敛推理**：reason 模式，由模型自行判断各章来源与缺口（SSE 流式） |
 
 所有会改数据或调用模型的接口，成功时都在 `done` 事件里回传**整份 `state`**，
@@ -674,8 +681,9 @@ python web_server.py --browser "C:\Program Files\Mozilla Firefox\firefox.exe"
 
 **关键设计（与桌面版共用一套逻辑）**：`web_server.py` 只做"服务 + 界面"，
 业务判断一行不改 —— 项目读写走 `design_agent.Project`，提示词与解析走
-`DesignAgent`（`kickoff/ask/rewrite/finalize/convergence`）与 `parse_sections / parse_questions /
-parse_checklist / parse_convergence`，进度统计走 `coupling`，勾选状态走 `scope_core`，
+`DesignAgent`（`kickoff/ask/rewrite/finalize/convergence/scope_ask/scope_rewrite`）与
+`parse_sections / parse_questions / parse_checklist / parse_convergence`，
+勾选与状态判定走 `scope_core`（含 `parse_suggestions` 的检查表判定），进度统计走 `coupling`，
 Word 导出走 `docx_export`。因此代码里同样**没有任何章节↔阶段的映射表**，
 "哪条内容支撑哪一章、还缺什么"仍由模型在推理模式下自行判断。
 
@@ -683,22 +691,24 @@ Word 导出走 `docx_export`。因此代码里同样**没有任何章节↔阶�
 
 | 视图 | 状态 |
 |---|---|
-| **工作台** | ✅ **Phase 1 完成**：研究设想可编辑保存；十阶段导轨；每阶段「追问 → 回答 → 改写 → 采纳定稿」闭环；检查表、风险提示、下一步；汇总完整草案（含待补数据清单与投稿前自查）；导出 Markdown / Word；阶段深链接 `?view=work&sid=3` |
-| 统计（九阶段） | ◐ 只读：引导状态、自检进度 |
-| SCI 结构（七章） | ◐ 只读：引导状态、自检进度 |
-| 总览 | ✅ 收敛推理可跑（SSE + reason 模式）+ 三条工作线 + 十阶段进度表 |
+| **工作台（十阶段）** | ✅ Phase 1：研究设想可编辑保存；十阶段导轨；每阶段「追问 → 回答 → 改写 → 采纳定稿」；检查表、风险提示、下一步；汇总完整草案（含待补清单与投稿前自查）；导出 Markdown / Word；深链接 `?view=work&sid=3` |
+| **统计（九阶段）** | ✅ Phase 2：「结构内容」（要点/示例/公式/陷阱/输出/工具，检验计算阶段附 12 行速查表）⇄「引导完善」（追问 → 回答 → 定稿 → 采纳；自检清单可逐项勾选 / 全选 / 清空，采纳时按模型检查表自动勾选） |
+| **SCI 结构（七章）** | ✅ Phase 2：同一套模板；「结构内容」给出通用模型组件（EN+中）、必写/禁写、语言时态规则与词块组（均带书内页码） |
+| **总览** | ✅ 收敛推理可跑（SSE + reason 模式）+ 三条工作线 + 十阶段进度表 |
 
-统计与 SCI 结构两页的**编辑与引导式对话**（Phase 2）尚未接入，界面上已标注。
-工作台的十个阶段与桌面版共用同一份 `stages_data.py` 与同一套提示词，
-两边编辑同一个项目文件 —— **同一课题请勿两端同时编辑**。
+两页 scope 的引导**基于内容**：提示词里会整段带上该环节的规范与自检清单
+（自检里专门断言了 `【本环节】` 与 `自检清单` 确实在提示词里），
+而不是靠代码写死"这一环节该看哪几条"。四个页面编辑的是**同一个项目文件** ——
+与桌面版共用，**同一课题请勿两端同时编辑**。
 
 ```bat
-:: Web 版自检：97 项（接口 / 静态资源 / 目录穿越 / SSE 推理 / 工作台闭环 / 导出 /
-::             项目管理 / 离线无外链 / Python 3.8 兼容）
+:: Web 版自检：124 项（接口 / 静态资源 / 目录穿越 / SSE 推理 / 工作台闭环 / scope 闭环 /
+::             导出 / 自检勾选 / 项目管理 / 离线无外链 / Python 3.8 兼容）
 python _test_web.py
 
-:: 渲染与交互核对：造演示项目 → 起服务 → 无头 Chrome 截图 7 张 + 渲染后 DOM 判定 21 项
-::               + 真实点击跑一遍工作台闭环 5 项（追问 / 速读串联 / 改写 / 采纳 / 汇总）
+:: 渲染与交互核对：造演示项目 → 起服务 → 无头 Chrome 截图 10 张 + 渲染后 DOM 判定 30 项
+::               + 真实点击跑一遍闭环 10 项（追问 / 速读串联 / 改写 / 采纳 / 汇总 /
+::                统计追问 / 统计定稿 / 统计采纳 / 自检勾选 / SCI 追问）
 python _probe_web.py
 ::   截图落在 _shots\web_*.png（深浅两色、宽窄两档、工作台/统计/SCI/总览）
 ::   交互核对的做法：把一段自测脚本注入 web/ 的**临时副本**（不改仓库里的正式界面文件），
@@ -733,10 +743,10 @@ D:\python\envs\mar\python.exe _check_overlap.py
 :: 主题一致性：浅色 → 深色 → 浅色，逐控件查冻结色与"前景=背景"，并做像素级对比度验收
 D:\python\envs\mar\python.exe _check_theme.py
 
-:: Web 版：97 项自检（接口 / 静态资源 / SSE 推理 / 工作台闭环 / 导出 / 项目管理 / 离线无外链 / Python 3.8 兼容）
+:: Web 版：124 项自检（接口 / 静态资源 / SSE 推理 / 工作台与 scope 闭环 / 导出 / 勾选 / 离线无外链）
 D:\python\envs\mar\python.exe _test_web.py
 
-:: Web 版：真实浏览器渲染 + 交互核对（截图 7 张、DOM 判定 21 项、真实点击 5 项）
+:: Web 版：真实浏览器渲染 + 交互核对（截图 10 张、DOM 判定 30 项、真实点击 10 项）
 D:\python\envs\mar\python.exe _probe_web.py
 
 :: 收敛推理（reason 模式）：素材摘要 → 模型自行判断各章来源/缺口/就绪度

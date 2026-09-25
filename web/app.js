@@ -116,8 +116,10 @@ function setBusy(on) {
   Array.prototype.forEach.call(document.querySelectorAll('#wActions button'), function (b) {
     b.disabled = !!on;
   });
-  $('btnWorkStop').hidden = !(on && STREAM && STREAM.target === 'work');
-  $('btnConvStop').hidden = !(on && STREAM && STREAM.target === 'ov');
+  Object.keys(TARGETS).forEach(function (k) {
+    var el = $(TARGETS[k].stop);
+    if (el) { el.hidden = !(on && STREAM.target === k); }
+  });
 }
 
 /* -------------------------------------------------------------- 顶栏渲染 */
@@ -283,22 +285,342 @@ function boxText(id) {
 }
 
 /* ------------------------------------------------------- 统计 / SCI 结构 */
-function renderScope(target, rows) {
-  $(target).innerHTML = rows.map(function (r) {
-    var extra = [];
-    if (r.has_final) { extra.push('已定稿 ' + r.final_len + ' 字'); }
-    else if (r.draft_len) { extra.push('待采纳稿 ' + r.draft_len + ' 字'); }
-    if (r.questions) { extra.push('追问 ' + r.questions + ' 条'); }
-    return '<div class="srow">' +
-      '<div class="num">' + r.id + '</div>' +
-      '<div class="body"><b>' + esc(r.title) + '</b><span class="spec">' + esc(r.spec) +
-      '</span><div class="desc">' + esc(r.desc || '') +
-      (extra.length ? '　｜　' + esc(extra.join(' · ')) : '') + '</div></div>' +
-      '<div class="side"><span class="state">' + esc(r.guide_label) + '</span>' +
-      bar(r.checks_done, r.checks_total) +
-      '<span class="state ' + r.state + '">' + esc(r.state_label) + '</span></div>' +
-      '</div>';
+/* 两页共用一套模板：左栏环节导轨 + 右栏「结构内容 ⇄ 引导完善」。
+   引导闭环与工作台同构（追问 → 回答 → 定稿 → 采纳），区别在于它由**本环节的规范内容**
+   驱动，采纳时按模型的检查表自动勾选自检项。 */
+var SCOPES = {
+  stat: { page: 'stat', railId: 'statRail', titleId: 'statTitle', stateId: 'statState',
+          bodyId: 'statBody', actionsId: 'statActions', metaId: 'statMeta',
+          modeCId: 'statModeContent', modeGId: 'statModeGuide', countId: 'statCount',
+          railCountId: 'statRailCount', cur: '', mode: 'content', data: null },
+  shape: { page: 'shape', railId: 'shapeRail', titleId: 'shapeTitle', stateId: 'shapeState',
+           bodyId: 'shapeBody', actionsId: 'shapeActions', metaId: 'shapeMeta',
+           modeCId: 'shapeModeContent', modeGId: 'shapeModeGuide', countId: 'shapeCount',
+           railCountId: 'shapeRailCount', cur: '', mode: 'content', data: null }
+};
+
+function readAnswersIn(bodyId) {
+  return Array.prototype.map.call(
+    document.querySelectorAll('#' + bodyId + ' textarea.qa'),
+    function (t) { return t.value; });
+}
+
+function renderScopeView(page) {
+  var cfg = SCOPES[page];
+  var ov = ((STATE || {}).overview) || null;
+  if (!ov) {
+    $(cfg.railId).innerHTML = '<div class="empty">还没有课题。</div>';
+    $(cfg.countId).textContent = '';
+    $(cfg.railCountId).textContent = '';
+    $(cfg.bodyId).innerHTML = '';
+    $(cfg.actionsId).innerHTML = '';
+    $(cfg.titleId).textContent = '—';
+    return;
+  }
+  var rows = ov[page] || [];
+  if (!cfg.cur || !rows.some(function (r) { return r.key === cfg.cur; })) {
+    cfg.cur = (rows[0] || {}).key || '';
+  }
+  var done = rows.filter(function (r) { return r.state === 'done'; }).length;
+  var ticks = rows.reduce(function (a, r) { return a + r.checks_done; }, 0);
+  var total = rows.reduce(function (a, r) { return a + r.checks_total; }, 0);
+  $(cfg.countId).textContent = '已完成 ' + done + '/' + rows.length +
+                               ' 环节 · 自检 ' + ticks + '/' + total + ' 项';
+  $(cfg.railCountId).textContent = done + '/' + rows.length;
+  $(cfg.railId).innerHTML = rows.map(function (r) {
+    return '<button class="railitem' + (r.key === cfg.cur ? ' sel' : '') +
+      '" type="button" data-key="' + esc(r.key) + '">' +
+      '<span class="num">' + esc(r.icon || pad2(r.id)) + '</span>' +
+      '<span class="rtxt"><b>' + esc(r.title) + '</b><i>' + esc(r.guide_label) +
+      ' · 自检 ' + r.checks_done + '/' + r.checks_total + '</i></span>' +
+      '<span class="dot ' + r.state + '"></span></button>';
   }).join('');
+  Array.prototype.forEach.call($(cfg.railId).querySelectorAll('.railitem'), function (b) {
+    b.addEventListener('click', function () {
+      if (BUSY) { return; }
+      cfg.cur = b.getAttribute('data-key');
+      cfg.data = null;
+      QQ.set('key', cfg.cur);
+      history.replaceState(null, '', '?' + QQ.toString());
+      renderScopeView(page);
+    });
+  });
+  if (!cfg.data || cfg.data.key !== cfg.cur) {
+    loadScopeSection(page);
+  } else {
+    renderScopeDetail(page);
+  }
+}
+
+function loadScopeSection(page) {
+  var cfg = SCOPES[page];
+  if (!STATE || !STATE.current || !cfg.cur) { return Promise.resolve(); }
+  return fetch(API + '/scope?page=' + page + '&key=' + encodeURIComponent(cfg.cur) +
+               '&project=' + encodeURIComponent(STATE.current), { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d.ok === false) { throw new Error(d.error || '加载失败'); }
+      cfg.data = d;
+      renderScopeDetail(page);
+      return d;
+    })
+    .catch(function (e) { toast('加载环节失败：' + e.message); });
+}
+
+function renderScopeDetail(page) {
+  var cfg = SCOPES[page], d = cfg.data;
+  if (!d || !d.section) {
+    $(cfg.bodyId).innerHTML = '<div class="empty">选择一个环节。</div>';
+    $(cfg.actionsId).innerHTML = '';
+    return;
+  }
+  var s = d.section, node = d.node || {};      // 不用 sec 作变量名（会遮蔽 sec() 助手）
+  $(cfg.titleId).innerHTML = (s.icon ? esc(s.icon) + '　' : '') + esc(s.title);
+  $(cfg.stateId).textContent = d.state_label + '　·　自检 ' + d.progress[0] + '/' + d.progress[1];
+  $(cfg.stateId).className = 'tag ' + (d.state === 'done' ? 'ok'
+                                       : (d.state === 'todo' ? '' : 'warn'));
+  $(cfg.metaId).textContent = (s.spec || '') +
+    (node.updated ? '　·　更新 ' + node.updated : '') +
+    (node.model ? '　·　' + node.model : '');
+  $(cfg.modeCId).className = 'btn' + (cfg.mode === 'content' ? ' primary' : '');
+  $(cfg.modeGId).className = 'btn' + (cfg.mode === 'guide' ? ' primary' : '');
+
+  if (cfg.mode === 'content') {
+    $(cfg.bodyId).innerHTML = scopeContentHtml(page, d);
+    $(cfg.actionsId).innerHTML = '';
+    return;
+  }
+  $(cfg.bodyId).innerHTML = scopeGuideHtml(page, d);
+  $(cfg.actionsId).innerHTML = scopeActionsHtml(page, d);
+  bindChecklist(page);
+  setBusy(BUSY);
+}
+
+function scopeContentHtml(page, d) {
+  var s = d.section, h = [];                 // 注意：不要用 sec 作变量名，会遮蔽 sec() 助手
+  if (page === 'stat') {
+    if (d.cat && d.cat.n) {
+      h.push('<div><span class="catpill" style="background:' + esc(d.cat.c || '#4f9dff') +
+             '">' + esc(d.cat.n) + ' · 阶段 ' + s.id + '/9</span></div>');
+    }
+    h.push(sec('目标', ul(s.goal)));
+    if (s.example) {
+      h.push(sec(s.example_title || '示例化表述',
+                 '<div class="box">' + esc(s.example) + '</div>'));
+    }
+    if (s.formula && s.formula.length) {
+      h.push(sec('公式与参数', '<div class="box">' + s.formula.map(function (x) {
+        return esc(x);
+      }).join('\n') + '</div>'));
+    }
+    h.push(sec('常见陷阱', ul(s.pitfalls, 'bad')));
+    if (s.output && s.output.length) {
+      h.push(sec(s.output_title || '输出', ul(s.output, 'ok')));
+    }
+    h.push(sec('对应工具', '<div class="box">' +
+      esc((s.tools || []).join('、') ||
+          '本阶段无计算工具（由数据准备脚本承担，决策需留痕）') + '</div>'));
+    if (d.cheatsheet) {
+      h.push(sec('常用检验速查表', '<div class="cheat">' + d.cheatsheet.map(function (r) {
+        return '<div class="row2"><b>' + esc(r[0]) + ' → ' + esc(r[1]) + '</b>' +
+               '<span>前提：' + esc(r[2]) + '　｜　scipy：' + esc(r[3]) +
+               '　｜　R：' + esc(r[4]) + '</span></div>';
+      }).join('') + '</div>'));
+      h.push('<div class="hint">支持的检验 kind：' +
+             esc((d.test_kinds || []).join('、')) + '</div>');
+    }
+  } else {
+    h.push(sec('功能定位', '<div class="box">' + esc(s.goal || '') + '</div>'));
+    h.push(sec('通用模型（' + (s.model || []).length + ' 个组件）',
+      (s.model || []).map(function (m, i) {
+        return '<div class="modelrow"><b><span class="idx">' + pad2(i + 1) + '</span>' +
+               esc(m.en) + '</b><i>' + esc(m.zh) + '</i></div>';
+      }).join('')));
+    h.push(sec('内容边界', ul(s.must, 'ok') + ul(s.must_not, 'bad')));
+    if (s.language && s.language.length) {
+      h.push(sec('语言与时态', ul(s.language.map(function (r) {
+        return r.rule + '（' + r.page + '）';
+      }))));
+    }
+    if (s.phrases && s.phrases.length) {
+      h.push(sec('词块组', s.phrases.map(function (g) {
+        return '<div class="modelrow"><b>' + esc(g.group) + '　（书 ' + esc(g.page) +
+               '）</b><i>' + esc((g.items || []).join('；')) + '</i></div>';
+      }).join('')));
+    }
+  }
+  if (s.note) { h.push(sec('说明', '<div class="box">' + esc(s.note) + '</div>')); }
+  return h.join('');
+}
+
+function scopeGuideHtml(page, d) {
+  var node = d.node || {}, h = [];
+  if (!node.assessment && !(node.questions || []).length && !node.draft && !node.final) {
+    h.push('<div class="box">这个环节还没有内容。点「开始引导」：模型会带着<b>本环节的规范要求</b>' +
+           '和本项目已有的全部素材，先给出「现状评估」，再提出必须澄清的问题；你回答后它会产出' +
+           '可直接采纳的定稿，并按检查表给出勾选建议。</div>');
+  }
+  if (node.assessment) {
+    h.push(sec('现状评估', '<div class="box">' + esc(node.assessment) + '</div>'));
+  }
+  if ((node.questions || []).length) {
+    h.push(sec('追问（回答后可生成定稿）', node.questions.map(function (q, i) {
+      return '<div class="qbox"><div class="q">Q' + (i + 1) + '　' + esc(q.q || '') + '</div>' +
+        (q.why ? '<div class="why">为什么问：' + esc(q.why) + '</div>' : '') +
+        '<textarea class="ta qa" rows="2" placeholder="在这里回答（留空则由模型按常规做法给建议值）">' +
+        esc((node.answers || [])[i] || '') + '</textarea></div>';
+    }).join('')));
+  }
+  if (node.draft) {
+    h.push(sec('定稿（可直接编辑；采纳后收录并自动勾选自检项）',
+      '<textarea id="' + page + 'DraftBox" class="ta" rows="12">' + esc(node.draft) +
+      '</textarea>'));
+  }
+  if (node.risks) {
+    h.push(sec('风险提示', '<div class="box warn">' + esc(node.risks) + '</div>'));
+  }
+  var sug = d.suggestions || [];
+  if (sug.length) {
+    var okN = sug.filter(function (s) { return s[1]; }).map(function (s) { return s[0] + 1; });
+    var noN = sug.filter(function (s) { return !s[1]; }).map(function (s) { return s[0] + 1; });
+    h.push(sec('模型判定', '<div class="box">已满足 ' + (okN.join('、') || '—') +
+      '；待补 ' + (noN.join('、') || '—') +
+      '（采纳时会自动勾选已满足项；也可以自己勾）</div>'));
+  }
+  var checked = d.checked || {};
+  h.push(sec('自检清单（' + d.progress[0] + '/' + d.progress[1] + '）',
+    '<div class="cklist">' + d.checks.map(function (c, i) {
+      var on = !!checked[String(i)];
+      var suggested = sug.some(function (s) { return s[0] === i && s[1]; });
+      return '<div class="ckitem' + (on ? ' on' : '') + (suggested ? ' sug' : '') +
+        '" data-idx="' + i + '" title="点击切换">' +
+        '<span class="box3d">✓</span><span><span class="num">' + (i + 1) + '</span>' +
+        esc(c) + '</span></div>';
+    }).join('') + '</div>'));
+  if (node.final) {
+    h.push(sec('已收录定稿（可编辑后保存）',
+      '<textarea id="' + page + 'FinalBox" class="ta" rows="10">' + esc(node.final) +
+      '</textarea>', 'ok'));
+  }
+  if (node.next) { h.push(sec('下一步', '<div class="box">' + esc(node.next) + '</div>')); }
+  return h.join('');
+}
+
+function scopeActionsHtml(page, d) {
+  var node = d.node || {}, hasQ = (node.questions || []).length > 0;
+  function btn(act, text, cls) {
+    return '<button class="btn ' + (cls || 'ghost') + '" type="button" data-act="' + act +
+           '">' + text + '</button>';
+  }
+  var b = [];
+  b.push(btn('ask', (node.assessment || hasQ) ? '重新追问' : '开始引导',
+             (node.assessment || hasQ) ? 'ghost' : 'primary'));
+  if (hasQ) {
+    b.push(btn('rewrite', node.draft ? '重新生成定稿' : '提交回答并生成定稿', 'primary'));
+    b.push(btn('saveAnswers', '只保存回答'));
+  }
+  if (node.draft) { b.push(btn('accept', '采纳定稿', 'primary')); }
+  if (node.final) { b.push(btn('saveFinal', '保存定稿修改')); }
+  b.push(btn('all', '自检全选'));
+  b.push(btn('none', '清空自检'));
+  return b.join('');
+}
+
+function bindChecklist(page) {
+  var cfg = SCOPES[page];
+  var host = $(cfg.bodyId);
+  Array.prototype.forEach.call(host.querySelectorAll('.ckitem'), function (el) {
+    el.addEventListener('click', function () {
+      if (BUSY) { return; }
+      var idx = parseInt(el.getAttribute('data-idx'), 10);
+      var on = !el.classList.contains('on');
+      el.classList.toggle('on', on);
+      post(API + '/scope/save', {
+        project: STATE.current, page: page, key: cfg.cur, set_check: [[idx, on]]
+      }).then(function (j) {
+        if (j.state) { applyState(j.state); }
+        if (j.scope) { cfg.data = j.scope; renderScopeDetail(page); }
+        toast(on ? '已勾选自检项 ' + (idx + 1) : '已取消自检项 ' + (idx + 1));
+      }).catch(function (e) {
+        el.classList.toggle('on', !on);
+        toast('保存勾选失败：' + e.message);
+      });
+    });
+  });
+}
+
+function scopeAction(page, act) {
+  var cfg = SCOPES[page], d = cfg.data;
+  if (!d || BUSY) { return; }
+  var proj = STATE.current, key = cfg.cur;
+  var answers = readAnswersIn(cfg.bodyId);
+  function boxText(id) {
+    var el = document.getElementById(page + id);
+    return el ? el.value : '';
+  }
+  if (act === 'ask') {
+    streamAction(API + '/scope/ask', { project: proj, page: page, key: key }, page);
+  } else if (act === 'rewrite') {
+    streamAction(API + '/scope/rewrite',
+                 { project: proj, page: page, key: key, answers: answers }, page);
+  } else if (act === 'saveAnswers') {
+    post(API + '/scope/answers',
+         { project: proj, page: page, key: key, answers: answers })
+      .then(function (j) {
+        if (j.state) { applyState(j.state); }
+        if (j.scope) { cfg.data = j.scope; renderScopeDetail(page); }
+        toast('已保存回答');
+      }).catch(function (e) { toast('保存失败：' + e.message); });
+  } else if (act === 'accept') {
+    post(API + '/scope/save',
+         { project: proj, page: page, key: key, accept: true,
+           final: boxText('DraftBox'), answers: answers })
+      .then(function (j) {
+        if (j.state) { applyState(j.state); }
+        if (j.scope) { cfg.data = j.scope; renderScopeDetail(page); }
+        toast('已采纳定稿' + (j.ticked ? '，自动勾选 ' + j.ticked + ' 项自检' : ''));
+      }).catch(function (e) { toast('采纳失败：' + e.message); });
+  } else if (act === 'saveFinal') {
+    post(API + '/scope/save',
+         { project: proj, page: page, key: key, final: boxText('FinalBox'),
+           answers: answers })
+      .then(function (j) {
+        if (j.sep) { return; }
+        if (j.state) { applyState(j.state); }
+        if (j.scope) { cfg.data = j.scope; renderScopeDetail(page); }
+        toast('已保存定稿修改');
+      }).catch(function (e) { toast('保存失败：' + e.message); });
+  } else if (act === 'all' || act === 'none') {
+    post(API + '/scope/save',
+         { project: proj, page: page, key: key, set_all: (act === 'all') })
+      .then(function (j) {
+        if (j.state) { applyState(j.state); }
+        if (j.scope) { cfg.data = j.scope; renderScopeDetail(page); }
+        toast(act === 'all' ? '已勾选全部自检项' : '已清空自检');
+      }).catch(function (e) { toast('操作失败：' + e.message); });
+  }
+}
+
+function bindScope(page) {
+  var cfg = SCOPES[page];
+  $(cfg.modeCId).addEventListener('click', function () {
+    if (BUSY) { return; }
+    cfg.mode = 'content';
+    QQ.set('mode', 'content');
+    history.replaceState(null, '', '?' + QQ.toString());
+    renderScopeDetail(page);
+  });
+  $(cfg.modeGId).addEventListener('click', function () {
+    if (BUSY) { return; }
+    cfg.mode = 'guide';
+    QQ.set('mode', 'guide');
+    history.replaceState(null, '', '?' + QQ.toString());
+    renderScopeDetail(page);
+  });
+  $(cfg.actionsId).addEventListener('click', function (ev) {
+    var b = ev.target.closest ? ev.target.closest('button[data-act]') : null;
+    if (b) { scopeAction(page, b.getAttribute('data-act')); }
+  });
 }
 
 /* ------------------------------------------------------------------ 总览 */
@@ -390,8 +712,8 @@ function applyState(d) {
   renderTopbar(d);
   if (d.overview) {
     renderWork(d.overview);
-    renderScope('statRows', d.overview.stat || []);
-    renderScope('shapeRows', d.overview.shape || []);
+    renderScopeView('stat');
+    renderScopeView('shape');
     renderLanes(d.overview);
     renderStageTable(d.overview);
     renderConvergence(d.convergence);
@@ -403,8 +725,12 @@ function applyState(d) {
     $('stageRail').innerHTML = '<div class="empty">还没有课题，点右上「新建」。</div>';
     $('wDetail').innerHTML = '';
     $('wActions').innerHTML = '';
-    $('statRows').innerHTML = '<div class="empty">还没有课题。</div>';
-    $('shapeRows').innerHTML = '<div class="empty">还没有课题。</div>';
+    SCOPES.stat.cur = '';
+    SCOPES.shape.cur = '';
+    SCOPES.stat.data = null;
+    SCOPES.shape.data = null;
+    renderScopeView('stat');
+    renderScopeView('shape');
     $('laneBox').innerHTML = '';
     $('digestBox').innerHTML = '';
     $('projMeta').innerHTML = '';
@@ -496,12 +822,18 @@ function bindProjects() {
 }
 
 /* ------------------------------------------------------ 流式调用（SSE） */
-var STREAM = { target: 'ov', box: 'convText', live: 'convLive' };
+var TARGETS = {
+  work: { box: 'wText', live: 'wLive', stop: 'btnWorkStop' },
+  ov: { box: 'convText', live: 'convLive', stop: 'btnConvStop' },
+  stat: { box: 'statText', live: 'statLive', stop: 'btnStatStop' },
+  shape: { box: 'shapeText', live: 'shapeLive', stop: 'btnShapeStop' }
+};
+var STREAM = { target: 'ov' };
 var PENDING_DONE = null;        // 流结束后的后续动作（例如速读完成→自动开始追问），
                                 // 必须等 setBusy(false) 之后再跑，否则会被"忙碌中"挡掉
 
 function liveAppend(kind, text) {
-  var box = $(STREAM.box);
+  var box = $(TARGETS[STREAM.target].box);
   if (kind === 'status') {
     liveAppend._rz = null;
     box.appendChild(document.createTextNode('\n· ' + text + '\n'));
@@ -522,13 +854,12 @@ function liveAppend(kind, text) {
 function streamAction(url, payload, target, onDone) {
   if (!STATE || !STATE.current) { toast('先选择或新建一个课题'); return; }
   if (BUSY) { toast('上一步还在进行中'); return; }
-  STREAM.target = target || 'ov';
-  STREAM.box = STREAM.target === 'work' ? 'wText' : 'convText';
-  STREAM.live = STREAM.target === 'work' ? 'wLive' : 'convLive';
-  var box = $(STREAM.box);
+  STREAM.target = TARGETS[target] ? target : 'ov';
+  var t = TARGETS[STREAM.target];
+  var box = $(t.box);
   box.textContent = '';
   liveAppend._rz = null;
-  $(STREAM.live).hidden = false;
+  $(t.live).hidden = false;
   setBusy(true);
   ABORT = ('AbortController' in window) ? new AbortController() : null;
 
@@ -600,9 +931,15 @@ function handleEvent(obj, onDone) {
       LAST_FINAL = { todo: obj.todo_list || '', selfcheck: obj.selfcheck || '' };
     }
     if (obj.state) { applyState(obj.state); }
+    if (obj.page && SCOPES[obj.page] && SCOPES[obj.page].cur === obj.key) {
+      loadScopeSection(obj.page);            // scope 动作 → 重新拉本节（拿最新定稿与勾选）
+    }
     var msg = { ask: '追问完成：' + (obj.questions || 0) + ' 条问题',
+                scope_ask: '追问完成：' + (obj.questions || 0) + ' 条问题',
                 rewrite: '改写完成：' + (obj.draft_len || 0) + ' 字 · 检查表 ' +
                          (obj.checks || 0) + ' 条',
+                scope_rewrite: '定稿完成：' + (obj.draft_len || 0) + ' 字 · 自检判定 ' +
+                               ((obj.suggestions || []).length) + ' 条',
                 finalize: '已生成完整草案：' + (obj.final_len || 0) + ' 字',
                 convergence: '收敛推理完成：' + (obj.chapters || 0) + ' 章' }[obj.kind] ||
               '完成';
@@ -715,8 +1052,12 @@ function bindConvergence() {
   $('btnConv').addEventListener('click', function () {
     streamAction(API + '/convergence', { project: STATE.current }, 'ov');
   });
-  $('btnConvStop').addEventListener('click', function () { if (ABORT) { ABORT.abort(); } });
-  $('btnWorkStop').addEventListener('click', function () { if (ABORT) { ABORT.abort(); } });
+  Object.keys(TARGETS).forEach(function (k) {
+    var el = $(TARGETS[k].stop);
+    if (el) {
+      el.addEventListener('click', function () { if (ABORT) { ABORT.abort(); } });
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ 启动 */
@@ -734,7 +1075,19 @@ function boot() {
   });
   bindProjects();
   bindWork();
+  bindScope('stat');
+  bindScope('shape');
   bindConvergence();
+  var k0 = QQ.get('key');                          // 深链接：?view=stat&key=s3_power
+  if (k0) {
+    SCOPES.stat.cur = k0;
+    SCOPES.shape.cur = k0;
+  }
+  var m0 = QQ.get('mode');                         // 深链接：?view=stat&mode=guide
+  if (m0 === 'guide' || m0 === 'content') {
+    SCOPES.stat.mode = m0;
+    SCOPES.shape.mode = m0;
+  }
   showView(QQ.get('view') || 'ov');
   loadState(true);
 }

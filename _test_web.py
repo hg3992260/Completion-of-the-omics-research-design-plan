@@ -125,10 +125,26 @@ FINALIZE = """【设计草案】
 【投稿前自查】按 CLEAR 逐条核对；按 TRIPOD+AI 报告模型细节；按 METRICS 报告分割一致性。
 """
 
+SCOPE_REWRITE = """【定稿】本研究的主要结局为病理证实的恶性（高级别 IPMN / 浸润癌）。
+采用多因素 logistic 回归建立预测模型，自变量按 EPV≥10 控制数量；
+连续变量以受限立方样条检验线性，缺失值用多重插补（m=20）处理；
+模型性能以 AUC 及 95%CI 报告，并用 bootstrap 1000 次做内部验证，校准用校准曲线与 Brier 分数。
+【检查表】
+- [x] 1
+- [ ] 2
+- [x] 3
+- [ ] 4
+- [ ] 5
+- [ ] 6
+【风险提示】把 EPV 算成"变量数×10"而忽略事件数；缺失值用均值填补会低估方差。
+【下一步】进入下一环节：效应量与置信区间的报告口径。
+"""
+
 # (提示词里的标记, 假输出, 动作名)
 CANNED = [
     ("【设计速读】", KICKOFF, "kickoff"),
     ("【改写稿】", REWRITE, "rewrite"),
+    ("【定稿】", SCOPE_REWRITE, "scope_rewrite"),
     ("【设计草案】", FINALIZE, "finalize"),
     ("【收敛总览】", DEMO, "convergence"),
     ("【现状评估】", ASK, "ask"),
@@ -509,8 +525,147 @@ def main() -> int:
         finally:
             web_server.RUN_LOCK.release()
 
-        # ---------------------------------------------------------- 7 离线/兼容
-        print("\n[6] 离线可用性与 Python 3.8 兼容")
+        # ---------------------------------------------------------- 7 scope 闭环
+        print("\n[6] 统计 / SCI 结构闭环（结构内容 + 引导完善 + 自检勾选）")
+        import stat_data
+        import shape_data
+        s1 = stat_data.STAGES[0]["key"]                  # 问题定义与假设形式化
+        s6 = stat_data.STAGES[5]["key"]                  # 检验计算（附速查表）
+        n_checks_s1 = len(stat_data.STAGES[0]["checks"])
+
+        code, body, _ = get(base + "/api/scope?page=stat&key=" + s1)
+        d = json.loads(body)
+        check("GET /api/scope 200", code == 200 and d.get("ok"), body[:200])
+        check("返回环节完整内容与自检清单",
+              d.get("section", {}).get("title") == stat_data.STAGES[0]["title"] and
+              len(d.get("checks") or []) == n_checks_s1, body[:200])
+        check("初始状态为未开始、自检 0 项",
+              d.get("state") == "todo" and d.get("progress") == [0, n_checks_s1],
+              json.dumps(d.get("progress"), ensure_ascii=False))
+        check("分类色带一并返回（stat）", bool((d.get("cat") or {}).get("c")), str(d.get("cat")))
+
+        code, body, _ = get(base + "/api/scope?page=stat&key=" + s6)
+        d6 = json.loads(body)
+        check("「检验计算」环节附常用检验速查表",
+              len(d6.get("cheatsheet") or []) == 12 and len(d6.get("test_kinds") or []) >= 10,
+              str(len(d6.get("cheatsheet") or [])))
+        code, body, _ = get(base + "/api/scope?page=shape&key=title")
+        ds = json.loads(body)
+        check("SCI 环节也能取到（title 章）",
+              ds.get("section", {}).get("key") == "title" and
+              len(ds.get("checks") or []) == len(shape_data.SHAPE[0]["checks"]), body[:200])
+        code, body, _ = get(base + "/api/scope?page=stat&key=%E4%B8%8D%E5%AD%98%E5%9C%A8")
+        check("未知 key 回退到第一个环节且不报错",
+              code == 200 and json.loads(body).get("key") == s1, body[:120])
+        code, body, _ = get(base + "/api/scope?page=stat&key=" + s1 + "&project=%E4%B8%8D%E5%AD%98%E5%9C%A8")
+        check("scope 取不存在的项目返回 400", code == 400, "code=%s" % code)
+
+        # 引导：追问
+        code, body = post(base + "/api/scope/ask",
+                          {"project": "测试课题", "page": "stat", "key": s1})
+        d = last_done(body)
+        check("scope 追问成功", code == 200 and d.get("ok") and
+              d.get("kind") == "scope_ask", body[:200])
+        check("scope 追问解析出 2 条问题", d.get("questions") == 2, json.dumps(
+            d, ensure_ascii=False)[:200])
+        check("提示词带上了本环节规范（引导基于内容）",
+              "自检清单" in "\n".join(m.get("content", "")
+                                    for m in web_server.STATE["client"].messages) and
+              "【本环节】" in "\n".join(m.get("content", "")
+                                     for m in web_server.STATE["client"].messages))
+        check("追问走的是 scope 提示词", web_server.STATE["client"].kinds[-1] == "scope_rewrite"
+              or web_server.STATE["client"].kinds[-1] == "ask",
+              str(web_server.STATE["client"].kinds[-3:]))
+        st = ((d.get("state") or {}).get("overview") or {})
+        row1 = next((r for r in (st.get("stat") or []) if r["key"] == s1), {})
+        check("环节状态变为已追问", row1.get("guide") == "asked", str(row1)[:160])
+
+        # 只保存回答
+        ans_s = ["主要结局为病理证实的恶性", "按 EPV≥10 控制变量数"]
+        code, body = post(base + "/api/scope/answers",
+                          {"project": "测试课题", "page": "stat", "key": s1,
+                           "answers": ans_s})
+        j = json.loads(body)
+        check("scope 只保存回答",
+              code == 200 and (j.get("scope", {}).get("node", {}).get("answers") or [""])[0]
+              .startswith("主要结局"), body[:160])
+
+        # 改写 → 定稿 + 自检判定
+        code, body = post(base + "/api/scope/rewrite",
+                          {"project": "测试课题", "page": "stat", "key": s1,
+                           "answers": ans_s})
+        d = last_done(body)
+        check("scope 定稿成功", code == 200 and d.get("ok") and
+              d.get("kind") == "scope_rewrite", body[:200])
+        check("定稿与风险/下一步已解析", (d.get("draft_len") or 0) > 100,
+              str(d.get("draft_len")))
+        sug = d.get("suggestions") or []
+        check("模型自检判定解析出 2 项满足", len(sug) == 6 and
+              [x for x in sug if x[1]] == [[0, True], [2, True]], str(sug))
+        check("scope 改写前先落盘回答",
+              d.get("state") and (d["state"]["overview"]["stat"][0]["questions"] == 2))
+
+        # 手动勾选 / 全选 / 清空
+        code, body = post(base + "/api/scope/save",
+                          {"project": "测试课题", "page": "stat", "key": s1,
+                           "set_check": [[1, True]]})
+        j = json.loads(body)
+        check("手动勾选自检项", (j.get("scope", {}).get("progress") or [0])[0] == 1,
+              str(j.get("scope", {}).get("progress")))
+        code, body = post(base + "/api/scope/save",
+                          {"project": "测试课题", "page": "stat", "key": s1, "set_all": True})
+        j = json.loads(body)
+        check("自检全选 → 环节判为已完成",
+              (j.get("scope", {}).get("progress") or [0])[0] == n_checks_s1 and
+              j.get("scope", {}).get("state") == "done",
+              str(j.get("scope", {}).get("progress")))
+        code, body = post(base + "/api/scope/save",
+                          {"project": "测试课题", "page": "stat", "key": s1, "set_all": False})
+        j = json.loads(body)
+        check("清空自检", (j.get("scope", {}).get("progress") or [1])[0] == 0,
+              str(j.get("scope", {}).get("progress")))
+
+        # 采纳 → 自动勾选
+        final_s = "本研究主要结局为病理证实的恶性，采用多因素 logistic 回归，EPV≥10。"
+        code, body = post(base + "/api/scope/save",
+                          {"project": "测试课题", "page": "stat", "key": s1,
+                           "accept": True, "final": final_s})
+        j = json.loads(body)
+        check("采纳定稿并自动勾选自检", code == 200 and j.get("ticked") == 2,
+              "ticked=%s" % j.get("ticked"))
+        check("采纳后自检为 2 项、状态已完成",
+              (j.get("scope", {}).get("progress") or [0])[0] == 2 and
+              j.get("scope", {}).get("state") == "done",
+              json.dumps(j.get("scope", {}).get("progress"), ensure_ascii=False))
+        check("采纳后定稿内容与编辑一致",
+              "logistic" in (j.get("scope", {}).get("node", {}).get("final") or ""),
+              str(j.get("scope", {}).get("node", {}).get("final"))[:120])
+
+        # SCI 页走同一条链路
+        code, body = post(base + "/api/scope/rewrite",
+                          {"project": "测试课题", "page": "shape", "key": "title",
+                           "answers": ["已与关键词表对齐"]})
+        d = last_done(body)
+        check("SCI 定稿链路可用", code == 200 and d.get("ok") and d.get("page") == "shape",
+              body[:200])
+        code, body = post(base + "/api/scope/save",
+                          {"project": "测试课题", "page": "shape", "key": "title",
+                           "accept": True})
+        j = json.loads(body)
+        check("SCI 采纳后自检被勾选", (j.get("scope", {}).get("progress") or [0])[0] == 2,
+              str(j.get("scope", {}).get("progress")))
+
+        # 并发保护
+        web_server.RUN_LOCK.acquire()
+        try:
+            code, body = post(base + "/api/scope/ask",
+                              {"project": "测试课题", "page": "stat", "key": s1})
+            check("并发 scope 追问返回 409", code == 409, "code=%s %s" % (code, body[:120]))
+        finally:
+            web_server.RUN_LOCK.release()
+
+        # ---------------------------------------------------------- 8 离线/兼容
+        print("\n[7] 离线可用性与 Python 3.8 兼容")
         files = ["web_server.py", "web/index.html", "web/app.css", "web/app.js",
                  "启动_Web版.bat"]
         missing = [f for f in files if not os.path.exists(os.path.join(HERE, f))]

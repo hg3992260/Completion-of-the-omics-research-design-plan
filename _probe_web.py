@@ -31,13 +31,20 @@ import shape_data                                                      # noqa: E
 import stat_data                                                       # noqa: E402
 import web_server                                                      # noqa: E402
 
+S1 = stat_data.STAGES[0]["key"]          # 问题定义与假设形式化
+S3 = stat_data.STAGES[2]["key"]          # 样本量与检验效能
+S6 = stat_data.STAGES[5]["key"]          # 检验计算（附速查表；演示项目里是"待采纳"状态）
+
 CASES = [
     ("web_ov_dark", "view=ov&theme=dark", 1600, 1250),
     ("web_ov_light", "view=ov&theme=light", 1600, 1250),
     ("web_work_dark", "view=work&theme=dark&sid=3", 1600, 1400),
     ("web_work_light", "view=work&theme=light&sid=3", 1600, 1400),
-    ("web_stat_dark", "view=stat&theme=dark", 1600, 1150),
-    ("web_shape_dark", "view=shape&theme=dark", 1600, 1150),
+    ("web_stat_content", "view=stat&mode=content&key=" + S1 + "&theme=dark", 1600, 1250),
+    ("web_stat_guide", "view=stat&mode=guide&key=" + S6 + "&theme=light", 1600, 1400),
+    ("web_stat_cheat", "view=stat&mode=content&key=" + S6 + "&theme=dark", 1600, 1500),
+    ("web_shape_content", "view=shape&mode=content&key=title&theme=dark", 1600, 1400),
+    ("web_shape_guide", "view=shape&mode=guide&key=methods&theme=light", 1600, 1400),
     ("web_ov_narrow", "view=ov&theme=dark", 1024, 1000),
 ]
 
@@ -90,7 +97,13 @@ def demo_project():
             node["answers"] = ["先做正态性检验，按结果选择。"]
             node["checks"] = {str(k): True for k in range(max(1, len(sec["checks"]) - 1))}
         elif i < 6:
-            node["draft"] = "待采纳稿：" + sec["title"] + " 的初步方案。"
+            node["assessment"] = ("本环节的检验方法与缺失值处理尚未写明，"
+                                  "EPV 口径也需要与样本量环节对齐。")
+            node["draft"] = ("待采纳稿：" + sec["title"] +
+                             " 的初步方案：主要结局为病理证实的恶性，EPV≥10 控制变量数。")
+            node["questions"] = [{"q": "用参数法还是非参数法？", "why": "分布未知"},
+                                 {"q": "缺失值如何处理？", "why": "影响方差与偏倚"}]
+            node["answers"] = ["先做正态性检验，按结果选择。", "多重插补 m=20。"]
             node["checks"] = {str(k): True for k in range(1)}
     for i, sec in enumerate(shape_data.SHAPE):
         node = p.shape.setdefault(sec["key"], {})
@@ -229,6 +242,87 @@ AUTOTEST_JS = r"""
           if (ex < 10) { return fail('待补数据清单没有渲染'); }
           ok('len=' + box.textContent.length + ' extra=' + ex);
         });
+      } else if (mode === 'scopeask' || mode === 'scoperewrite' || mode === 'scopeaccept'
+                 || mode === 'scopetick') {
+        // ---- scope 页（统计 / SCI）：page 由 URL 给出 ----
+        var page = new URLSearchParams(location.search).get('page') || 'stat';
+        var key = new URLSearchParams(location.search).get('key') || '';
+        var proj = document.getElementById('projSel').value;
+        function qa() { return document.querySelectorAll('#' + page + 'Body textarea.qa').length; }
+        function draftId() { return page + 'DraftBox'; }
+        function draftVal() {
+          var el = document.getElementById(draftId());
+          return el ? el.value.length : 0;
+        }
+        function stateTag() {
+          var el = document.getElementById(page + 'State');
+          return el ? el.textContent : '';
+        }
+        if (mode !== 'scopeask') {
+          // 定稿/采纳只需要引导模式；先切过去（同步渲染）
+          var mg = document.getElementById(page + 'ModeGuide');
+          if (mg) { mg.click(); }
+        } else {
+          var mc = document.getElementById(page + 'ModeContent');
+          if (mc) { mc.click(); }
+          if (!document.querySelector('#' + page + 'Body .catpill') &&
+              !document.querySelector('#' + page + 'Body .modelrow')) {
+            return fail('结构内容模式没有渲染规范内容');
+          }
+          var mg2 = document.getElementById(page + 'ModeGuide');
+          if (mg2) { mg2.click(); }
+        }
+        if (mode === 'scopeask') {
+          if (!click('#' + page + 'Actions button[data-act="ask"]')) { return; }
+          waitFor(function () { return qa() >= 1; }, function () {
+            ok('qa=' + qa() + ' state=' + stateTag());
+          });
+        } else if (mode === 'scoperewrite') {
+          if (!click('#' + page + 'Actions button[data-act="rewrite"]')) { return; }
+          waitFor(function () { return draftVal() >= 50; }, function () {
+            var ck = document.querySelectorAll('#' + page + 'Body .ckitem').length;
+            if (ck < 1) { return fail('自检清单没有渲染'); }
+            ok('draft=' + draftVal() + ' checks=' + ck + ' state=' + stateTag());
+          });
+        } else if (mode === 'scopeaccept') {
+          if (!click('#' + page + 'Actions button[data-act="accept"]')) { return; }
+          waitFor(function () { return stateTag().indexOf('已完成') >= 0; }, function () {
+            fetch('/api/scope?page=' + page + '&key=' + encodeURIComponent(key) +
+                  '&project=' + encodeURIComponent(proj))
+              .then(function (r) { return r.json(); })
+              .then(function (d) {
+                if (!d.node || !d.node.final) { return fail('定稿没有落盘'); }
+                if (!d.progress || d.progress[0] < 2) {
+                  return fail('自检没有被自动勾选：' + JSON.stringify(d.progress));
+                }
+                ok('final=' + d.node.final.length + ' checks=' + d.progress.join('/'));
+              });
+          });
+        } else if (mode === 'scopetick') {
+          var items = document.querySelectorAll('#' + page + 'Body .ckitem');
+          var target = null, i;
+          for (i = 0; i < items.length; i++) {
+            if (items[i].className.indexOf('on') < 0) { target = items[i]; break; }
+          }
+          if (!target) { return fail('没有可勾选的条目'); }
+          var idx = String(target.getAttribute('data-idx'));
+          var before = document.querySelectorAll('#' + page + 'Body .ckitem.on').length;
+          target.click();
+          var tries = 0;
+          (function poll() {                     // 勾选是异步落盘的 → 轮询服务端确认
+            fetch('/api/scope?page=' + page + '&key=' + encodeURIComponent(key) +
+                  '&project=' + encodeURIComponent(proj))
+              .then(function (r) { return r.json(); })
+              .then(function (d) {
+                if (d.checked && d.checked[idx]) {
+                  return ok('idx=' + (parseInt(idx, 10) + 1) + ' checks=' +
+                            d.progress.join('/') + ' before=' + before);
+                }
+                if (tries++ > 60) { return fail('服务端没有记录勾选 ' + idx); }
+                setTimeout(poll, 50);
+              });
+          })();
+        }
       } else {
         fail('unknown mode');
       }
@@ -275,11 +369,21 @@ def shoot(chrome, url, out, w, h):
 
 
 AUTOTEST_CASES = [
-    ("ask", "view=work&sid=1&autotest=ask", "追问：点按钮 → 出现回答输入框"),
+    ("ask", "view=work&sid=1&autotest=ask", "工作台追问：点按钮 → 出现回答输入框"),
     ("kickoff", "view=work&sid=1&autotest=kickoff", "速读完成后自动串到第一阶段追问"),
     ("rewrite", "view=work&sid=3&autotest=rewrite", "改写：点按钮 → 出现改写稿与检查表"),
     ("accept", "view=work&sid=3&autotest=accept", "采纳：点按钮 → 状态变已完成并落盘"),
     ("finalize", "view=work&autotest=finalize", "汇总：生成完整草案 + 待补清单"),
+    ("scopeask", "view=stat&key=" + S3 + "&autotest=scopeask&page=stat",
+     "统计追问：结构内容可见 → 引导追问出问题"),
+    ("scoperewrite", "view=stat&mode=guide&key=" + S6 + "&autotest=scoperewrite&page=stat",
+     "统计定稿：提交回答 → 定稿 + 自检清单"),
+    ("scopeaccept", "view=stat&mode=guide&key=" + S6 + "&autotest=scopeaccept&page=stat",
+     "统计采纳：定稿收录 + 按检查表自动勾选"),
+    ("scopetick", "view=stat&mode=guide&key=" + S6 + "&autotest=scopetick&page=stat",
+     "自检勾选：点条目 → 落盘并刷新进度"),
+    ("shapeask", "view=shape&key=methods&autotest=scopeask&page=shape",
+     "SCI 追问链路可用（同一套模板）"),
 ]
 
 
@@ -369,17 +473,13 @@ def dom_checks(chrome, base):
     secs2 = re.findall(r'<section class="view" id="view-(\w+)"( hidden="")?>', dom2)
     shown2 = [k for k, h in secs2 if not h]
     ck("切到统计页后只有统计可见", shown2 == ["stat"], str(shown2))
-    block = re.search(r'id="statRows"(.*?)id="shapeRows"', dom2, re.S)
-    n_stat = block.group(1).count('class="srow"') if block else -1
-    ck("统计页渲染出 9 行环节", n_stat == 9, "统计行=%s" % n_stat)
-
     # 工作台：第三阶段（演示项目里是"待采纳"状态，带追问与改写稿）
     dom3 = dump_dom(chrome, base + "?view=work&theme=dark&sid=3")
     secs3 = re.findall(r'<section class="view" id="view-(\w+)"( hidden="")?>', dom3)
     ck("切到工作台后只有工作台可见", [k for k, h in secs3 if not h] == ["work"],
        str([k for k, h in secs3 if not h]))
-    ck("阶段导轨渲染出 10 项", dom3.count('class="railitem') == 10,
-       str(dom3.count('class="railitem')))
+    ck("阶段导轨渲染出 10 项", len(re.findall(r'data-sid="\d+"', dom3)) == 10,
+       str(len(re.findall(r'data-sid="\d+"', dom3))))
     ck("导轨选中第三阶段", 'class="railitem sel" type="button" data-sid="3"' in dom3,
        str(re.findall(r'class="railitem[^"]*" type="button" data-sid="\d+"', dom3)))
     block3 = re.search(r'id="wDetail"(.*?)id="wLive"', dom3, re.S)
@@ -397,7 +497,45 @@ def dom_checks(chrome, base):
     ck("原始设想输入框已填充", 'id="rawDesign"' in dom3 and "胰腺囊性病变" in dom3)
     ck("完整草案框已填充", "研究问题" in (re.search(r'id="finalDoc"[^>]*>(.*?)</pre>', dom3,
                                               re.S) or [None, ""])[1])
-    return bad, 21
+
+    def part(dom, key, nxt):
+        """取出两个 id 之间的片段，避免把另一个（隐藏）视图的元素也数进来。"""
+        m = re.search(r'id="%s"(.*?)id="%s"' % (key, nxt), dom, re.S)
+        return m.group(1) if m else ""
+
+    # 统计页：结构内容 + 引导完善
+    d4 = dump_dom(chrome, base + "?view=stat&mode=content&key=" + S1)
+    n_rail = part(d4, "statRail", "statTitle").count('class="railitem')
+    ck("统计页渲染出 9 个环节", n_rail == 9, "环节=%s" % n_rail)
+    body4 = part(d4, "statBody", "statLive")
+    ck("统计「结构内容」渲染出分类色带与要点",
+       'class="catpill"' in body4 and "常见陷阱" in body4 and "对应工具" in body4,
+       body4[:200])
+    ck("统计页有「结构内容 / 引导完善」两个模式按钮",
+       'id="statModeContent"' in d4 and 'id="statModeGuide"' in d4)
+    d5 = dump_dom(chrome, base + "?view=stat&mode=guide&key=" + S6)
+    body5 = part(d5, "statBody", "statLive")
+    n_ck = len(re.findall(r'class="ckitem', body5))
+    ck("统计「引导完善」渲染出完整自检清单",
+       n_ck == len(stat_data.STAGES[5]["checks"]), "条目=%s" % n_ck)
+    ck("引导模式渲染出现状评估与追问输入框",
+       "现状评估" in body5 and 'class="ta qa"' in body5)
+    ck("引导模式渲染出定稿编辑框", 'id="statDraftBox"' in body5)
+    d8 = dump_dom(chrome, base + "?view=stat&mode=content&key=" + S6)
+    ck("「检验计算」环节渲染出检验速查表",
+       'class="cheat"' in part(d8, "statBody", "statLive"))
+    d6 = dump_dom(chrome, base + "?view=shape&mode=content&key=title")
+    n_rail2 = part(d6, "shapeRail", "shapeTitle").count('class="railitem')
+    body6 = part(d6, "shapeBody", "shapeLive")
+    ck("SCI 页渲染出 7 章", n_rail2 == 7, "章=%s" % n_rail2)
+    ck("SCI「结构内容」渲染出通用模型、内容边界与语言时态",
+       'class="modelrow"' in body6 and "内容边界" in body6 and "语言与时态" in body6,
+       body6[:200])
+    d7 = dump_dom(chrome, base + "?view=shape&mode=guide&key=methods")
+    n_ck2 = len(re.findall(r'class="ckitem', part(d7, "shapeBody", "shapeLive")))
+    ck("SCI「引导完善」渲染出自检清单",
+       n_ck2 == len(shape_data.SHAPE[3]["checks"]), "条目=%s" % n_ck2)
+    return bad, 30
 
 
 def main() -> int:

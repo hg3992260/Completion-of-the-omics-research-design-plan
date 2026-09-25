@@ -100,11 +100,38 @@
     <section class="view" id="view-stat" hidden>
       <div class="card">
         <div class="cardhead">
-          <h2>统计 <small>九阶段</small></h2>
-          <span class="tag">Phase 2 接入引导式对话</span>
+          <h2>统计 <small>九阶段 · 分析方案的提问、定稿与自检</small></h2>
+          <span id="statCount" class="tag"></span>
         </div>
-        <p class="hint">提问 → 回答 → 定稿 → 采纳的四步流程将在 Phase 2 落地；此处先显示每阶段的引导状态与自检进度。</p>
-        <div id="statRows" class="scoperows"></div>
+        <p class="hint">
+          「结构内容」看这一阶段的规范（目标 / 示例 / 公式 / 陷阱 / 输出 / 工具）；
+          「引导完善」是与工作台同构的闭环：<b>追问 → 回答 → 定稿 → 采纳</b>，
+          采纳时会按模型的检查表**自动勾选自检项**。
+        </p>
+      </div>
+      <div class="workgrid">
+        <div class="card railcard">
+          <div class="cardhead"><h2>九阶段</h2><span id="statRailCount" class="tag"></span></div>
+          <div id="statRail" class="raillist"></div>
+        </div>
+        <div class="card workcard">
+          <div class="cardhead">
+            <h2 id="statTitle">—</h2>
+            <span id="statState" class="tag"></span>
+          </div>
+          <div class="row modetabs">
+            <button id="statModeContent" class="btn" type="button">结构内容</button>
+            <button id="statModeGuide" class="btn primary" type="button">引导完善</button>
+            <button id="btnStatStop" class="btn ghost" type="button" hidden>停止</button>
+            <span id="statMeta" class="meta"></span>
+          </div>
+          <div id="statBody" class="wdetail"></div>
+          <div id="statLive" class="live" hidden>
+            <div class="livelabel">实时输出（弱化色为推理过程）</div>
+            <pre id="statText" class="livetext"></pre>
+          </div>
+          <div id="statActions" class="row wactions"></div>
+        </div>
       </div>
     </section>
 
@@ -112,11 +139,37 @@
     <section class="view" id="view-shape" hidden>
       <div class="card">
         <div class="cardhead">
-          <h2>SCI 结构 <small>七章</small></h2>
-          <span class="tag">Phase 2/3 接入引导式对话</span>
+          <h2>SCI 结构 <small>七章 · 通用模型、内容边界与成稿</small></h2>
+          <span id="shapeCount" class="tag"></span>
         </div>
-        <p class="hint">七章的 scope 与自检项已能读取；引导式完善与成稿写作将在后续阶段接入。</p>
-        <div id="shapeRows" class="scoperows"></div>
+        <p class="hint">
+          「结构内容」看这一章的通用模型组件、必写/禁写、语言时态与词块组（均带书内页码）；
+          「引导完善」同样是<b>追问 → 回答 → 定稿 → 采纳</b>，采纳后自动勾选自检项。
+        </p>
+      </div>
+      <div class="workgrid">
+        <div class="card railcard">
+          <div class="cardhead"><h2>七章</h2><span id="shapeRailCount" class="tag"></span></div>
+          <div id="shapeRail" class="raillist"></div>
+        </div>
+        <div class="card workcard">
+          <div class="cardhead">
+            <h2 id="shapeTitle">—</h2>
+            <span id="shapeState" class="tag"></span>
+          </div>
+          <div class="row modetabs">
+            <button id="shapeModeContent" class="btn" type="button">结构内容</button>
+            <button id="shapeModeGuide" class="btn primary" type="button">引导完善</button>
+            <button id="btnShapeStop" class="btn ghost" type="button" hidden>停止</button>
+            <span id="shapeMeta" class="meta"></span>
+          </div>
+          <div id="shapeBody" class="wdetail"></div>
+          <div id="shapeLive" class="live" hidden>
+            <div class="livelabel">实时输出（弱化色为推理过程）</div>
+            <pre id="shapeText" class="livetext"></pre>
+          </div>
+          <div id="shapeActions" class="row wactions"></div>
+        </div>
       </div>
     </section>
 

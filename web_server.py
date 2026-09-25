@@ -21,16 +21,21 @@ Windows 7 上连"内嵌浏览器"也走不通（WebView2 Runtime 109 是最后�
     GET  /static/<file>        界面静态资源
     GET  /api/health           健康检查
     GET  /api/state[?project=] 整份界面状态（项目列表 + 十阶段完整内容 + 三条工作线 + 九阶段/七章 + 收敛结论）
+    GET  /api/scope?page=&key= 一个 scope 环节的完整内容（结构内容）+ 当前状态与自检勾选（引导完善）
     GET  /api/export?fmt=md    导出 Markdown（无依赖）/ Word（需要 python-docx）→ 浏览器下载
     POST /api/project/new      新建空白项目
     POST /api/project/rename   项目改名
     POST /api/project/delete   删除项目
     POST /api/kickoff          速读研究设想（SSE 流式，结果记入对话记录）
-    POST /api/stage/ask        追问（SSE 流式）
+    POST /api/stage/ask        十阶段追问（SSE 流式）
     POST /api/stage/answers    只保存研究者的回答
     POST /api/stage/rewrite    改写稿 + 检查表 + 风险提示（SSE 流式）
     POST /api/stage/save       保存编辑内容 / 采纳定稿
     POST /api/finalize         汇总完整设计草案（SSE 流式）
+    POST /api/scope/ask        scope 环节追问（SSE 流式）
+    POST /api/scope/rewrite    scope 定稿 + 自检判定（SSE 流式）
+    POST /api/scope/answers    只保存 scope 回答
+    POST /api/scope/save       保存 scope 编辑 / 勾选自检 / 采纳定稿（会自动按检查表勾选）
     POST /api/convergence      收敛推理（SSE 流式）
 
 所有会改数据或调用模型的接口，成功时都会在 ``done`` 事件里回传整份 ``state``，
@@ -147,6 +152,7 @@ def _scope_rows(store: dict, data: list) -> list:
         rows.append({
             "id": s["id"], "key": s["key"], "title": s["title"],
             "spec": s.get("spec", ""), "desc": (s.get("desc") or s.get("goal") or "")[:200],
+            "icon": s.get("icon", ""), "cat": s.get("cat", ""),
             "state": scope_core.state(store, s),
             "state_label": scope_core.STATUS_LABEL.get(scope_core.state(store, s), ""),
             "guide": scope_core.guide_status(store, s["key"]),
@@ -158,6 +164,49 @@ def _scope_rows(store: dict, data: list) -> list:
             "questions": len(node.get("questions") or []),
         })
     return rows
+
+
+def scope_payload(page: str, key: str, project) -> dict:
+    """一个 scope 环节的完整内容（结构内容模式）+ 当前状态（引导模式）。
+
+    引导式对话的一切都由**该环节的规范内容**驱动：把 section 整段回传，
+    前端"结构内容"页直接展示它，"引导完善"页把它作为追问/定稿的依据。
+    """
+    data = stat_data.STAGES if page == "stat" else shape_data.SHAPE
+    sec = next((s for s in data if s["key"] == key), None) or data[0]
+    store = (project.stat if page == "stat" else project.shape) or {}
+    node = scope_core.node(store, sec["key"])
+    got, total = scope_core.progress(store, sec)
+    section = {k: v for k, v in sec.items() if k != "checks"}
+    cat = stat_data.CATS.get(sec.get("cat", ""), {}) if page == "stat" else {}
+    extra = {}
+    if page == "stat" and sec.get("id") == 6:            # 「检验计算」阶段附速查表
+        extra = {"cheatsheet": [list(r) for r in stat_data.CHEATSHEET],
+                 "test_kinds": list(stat_data.TEST_KINDS)}
+    out = {
+        "ok": True, "page": page, "key": sec["key"],
+        "section": section, "cat": cat,
+        "checks": list(sec.get("checks") or []),
+        "checked": scope_core.checked(store, sec["key"]),
+        "progress": [got, total],
+        "state": scope_core.state(store, sec),
+        "state_label": scope_core.STATUS_LABEL.get(scope_core.state(store, sec), ""),
+        "guide": scope_core.guide_status(store, sec["key"]),
+        "guide_label": scope_core.GUIDE_STATUS.get(scope_core.guide_status(store, sec["key"]), ""),
+        "suggestions": [[i, bool(ok)] for i, ok in
+                        scope_core.parse_suggestions(node.get("checklist", ""),
+                                                    sec.get("checks") or [])],
+        "node": {"assessment": node.get("assessment", ""),
+                 "questions": [q if isinstance(q, dict) else {"q": str(q), "why": ""}
+                               for q in (node.get("questions") or [])],
+                 "answers": list(node.get("answers") or []),
+                 "draft": node.get("draft", ""), "final": node.get("final", ""),
+                 "risks": node.get("risks", ""), "checklist": node.get("checklist", ""),
+                 "next": node.get("next", ""), "model": node.get("model", ""),
+                 "updated": node.get("updated", "")},
+    }
+    out.update(extra)
+    return out
 
 
 def _stage_rows(project) -> list:
@@ -363,6 +412,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "llm": llm_info()})
         if path == "/api/state":
             return self._json(200, state_payload(self._query().get("project", "")))
+        if path == "/api/scope":
+            q = self._query()
+            project = resolve_project(q.get("project") or "")
+            if project is None:
+                return self._json(400, {"ok": False, "error": "没有可操作的项目"})
+            page = q.get("page") if q.get("page") in ("stat", "shape") else "stat"
+            return self._json(200, scope_payload(page, q.get("key") or "", project))
         if path == "/api/export":
             return self._export()
         return self._json(404, {"ok": False, "error": "unknown path %s" % path})
@@ -404,6 +460,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._stage_save()
         if path == "/api/finalize":                  # 汇总完整草案（SSE）
             return self._finalize()
+        if path == "/api/scope/ask":                 # scope 追问（SSE）
+            return self._scope_ask()
+        if path == "/api/scope/rewrite":             # scope 定稿 + 自检判定（SSE）
+            return self._scope_rewrite()
+        if path == "/api/scope/answers":             # 只存回答（JSON）
+            return self._scope_answers()
+        if path == "/api/scope/save":                # 存编辑 / 勾选自检 / 采纳定稿（JSON）
+            return self._scope_save()
         if path == "/api/convergence":               # 收敛推理（SSE）
             return self._convergence()
         return self._json(404, {"ok": False, "error": "unknown path %s" % path})
@@ -479,17 +543,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- LLM 动作（统一走 SSE 推流）------------------------------------------
     def _llm_action(self, kind, build, apply_fn, reason=False, max_tokens=None,
-                    status="", pre_fn=None):
+                    status="", pre_fn=None, scope=False):
         """跑一次 LLM 调用并把结果以 SSE 推给浏览器。
 
         * ``build(agent, ctx)``    组装 messages（用桌面版同一套提示词）
         * ``pre_fn(project, ctx)`` 调用前的落库（例如先把研究者的回答存下来）
         * ``apply_fn(project, out, ctx)`` 解析并落库，返回给前端的附加字段
-        ``ctx`` = {"sid": 阶段号, "body": 请求体}。
+        ``ctx`` = {"sid": 阶段号, "body": 请求体}；``scope=True`` 时另带
+        {"page": stat|shape, "key": 环节 key, "sec": 环节数据}。
         结束后统一回传 ``state``（整份界面状态），前端只管整体重绘。
         """
         body = self._body()
-        ctx = {"sid": self._sid(body), "body": body}
+        ctx = {"sid": self._sid(body), "body": body, "page": "", "key": "", "sec": None}
+        if scope:
+            page = body.get("page") if body.get("page") in ("stat", "shape") else "stat"
+            data = stat_data.STAGES if page == "stat" else shape_data.SHAPE
+            want = body.get("key") or ""
+            sec = next((s for s in data if s["key"] == want), None) or data[0]
+            ctx.update({"page": page, "key": sec["key"], "sec": sec})
         project = resolve_project(body.get("project") or "")
         if project is None:
             return self._json(400, {"ok": False, "error": "没有可操作的项目"})
@@ -544,6 +615,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:                                  # noqa: BLE001
                 saved, err = False, "%s: %s" % (type(e).__name__, e)
             payload = {"type": "done", "ok": True, "kind": kind, "sid": ctx["sid"],
+                       "page": ctx["page"], "key": ctx["key"],
                        "saved": saved, "save_error": err,
                        "usage": out.get("usage") or {}, "model": out.get("model", ""),
                        "elapsed": round(float(out.get("elapsed") or 0), 1),
@@ -702,6 +774,121 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                                      # noqa: BLE001
             return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
         return self._json(200, {"ok": True, "sid": sid, "status": st["status"],
+                                "state": state_payload("", project)})
+
+    # -- scope 环节（统计九阶段 / SCI 七章）----------------------------------
+    def _scope_ask(self):
+        def build(agent, ctx):
+            return agent.scope_ask_messages(ctx["page"], ctx["sec"])
+
+        def apply_fn(project, out, ctx):
+            store = project.stat if ctx["page"] == "stat" else project.shape
+            node = scope_core.node(store, ctx["key"])
+            sec = parse_sections(out.get("content") or "")
+            node["assessment"] = pick(sec, "现状评估")
+            node["questions"] = parse_questions(pick(sec, "必须澄清", "问题"))
+            node["answers"] = ["" for _ in node["questions"]]
+            node["status"] = "asked"
+            node["model"] = out.get("model", "")
+            node["updated"] = time.strftime("%H:%M")
+            return {"questions": len(node["questions"])}
+
+        return self._llm_action("scope_ask", build, apply_fn, scope=True,
+                                status="正在对照本环节规范生成现状评估与追问 · %(model)s")
+
+    def _scope_answers(self):
+        """只存回答（不调用模型）。"""
+        body = self._body()
+        project = resolve_project(body.get("project") or "")
+        if project is None:
+            return self._json(400, {"ok": False, "error": "没有可操作的项目"})
+        page = body.get("page") if body.get("page") in ("stat", "shape") else "stat"
+        data = stat_data.STAGES if page == "stat" else shape_data.SHAPE
+        sec = next((s for s in data if s["key"] == (body.get("key") or "")), None) or data[0]
+        store = project.stat if page == "stat" else project.shape
+        node = scope_core.node(store, sec["key"])
+        if isinstance(body.get("answers"), list):
+            node["answers"] = [str(a or "").strip() for a in body["answers"]]
+        node["updated"] = time.strftime("%H:%M")
+        try:
+            project.save()
+        except Exception as e:                                      # noqa: BLE001
+            return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+        return self._json(200, {"ok": True, "scope": scope_payload(page, sec["key"], project),
+                                "state": state_payload("", project)})
+
+    def _scope_rewrite(self):
+        def build(agent, ctx):
+            return agent.scope_rewrite_messages(ctx["page"], ctx["sec"])
+
+        def pre_fn(project, ctx):
+            answers = ctx["body"].get("answers")
+            if isinstance(answers, list):
+                store = project.stat if ctx["page"] == "stat" else project.shape
+                scope_core.node(store, ctx["key"])["answers"] = [str(a or "").strip()
+                                                                 for a in answers]
+
+        def apply_fn(project, out, ctx):
+            store = project.stat if ctx["page"] == "stat" else project.shape
+            node = scope_core.node(store, ctx["key"])
+            sec = parse_sections(out.get("content") or "")
+            node["draft"] = pick(sec, "定稿", "改写稿")
+            node["risks"] = pick(sec, "风险提示")
+            node["next"] = pick(sec, "下一步")
+            node["checklist"] = pick(sec, "检查表")
+            node["status"] = "drafted" if node["draft"] else node.get("status", "asked")
+            node["model"] = out.get("model", "")
+            node["updated"] = time.strftime("%H:%M")
+            tips = scope_core.parse_suggestions(node["checklist"], ctx["sec"]["checks"])
+            return {"draft_len": len(node["draft"]),
+                    "suggestions": [[i, bool(ok)] for i, ok in tips]}
+
+        return self._llm_action("scope_rewrite", build, apply_fn, scope=True, pre_fn=pre_fn,
+                                status="正在按本环节规范生成定稿与自检判定 · %(model)s")
+
+    def _scope_save(self):
+        """保存 scope 环节的编辑：定稿/草稿/回答/自检勾选；accept 时按模型检查表自动勾选。"""
+        body = self._body()
+        project = resolve_project(body.get("project") or "")
+        if project is None:
+            return self._json(400, {"ok": False, "error": "没有可操作的项目"})
+        page = body.get("page") if body.get("page") in ("stat", "shape") else "stat"
+        data = stat_data.STAGES if page == "stat" else shape_data.SHAPE
+        sec = next((s for s in data if s["key"] == (body.get("key") or "")), None) or data[0]
+        store = project.stat if page == "stat" else project.shape
+        node = scope_core.node(store, sec["key"])
+        for k in ("assessment", "draft", "final", "risks", "next", "checklist"):
+            if isinstance(body.get(k), str):
+                node[k] = body[k].strip()
+        if isinstance(body.get("answers"), list):
+            node["answers"] = [str(a or "").strip() for a in body["answers"]]
+        if isinstance(body.get("checks"), dict):        # 整体覆盖 {"0": true, ...}
+            store[sec["key"]]["checks"] = {str(k): True for k, v in body["checks"].items() if v}
+        if isinstance(body.get("set_check"), list):     # [[序号, 是否勾选], ...]
+            for pair in body["set_check"]:
+                try:
+                    scope_core.set_check(store, sec["key"], int(pair[0]), bool(pair[1]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+        if body.get("set_all") in (True, False):
+            scope_core.set_all(store, sec, bool(body["set_all"]))
+        if body.get("status") in ("todo", "asked", "drafted", "done"):
+            node["status"] = body["status"]
+        ticked = 0
+        if body.get("accept"):                          # 采纳：定稿 + 按检查表自动勾选
+            node["final"] = (body.get("final") or node.get("draft") or "").strip()
+            node["status"] = "done"
+            for i, ok in scope_core.parse_suggestions(node.get("checklist", ""),
+                                                      sec.get("checks") or []):
+                scope_core.set_check(store, sec["key"], i, ok)
+                ticked += 1 if ok else 0
+        node["updated"] = time.strftime("%H:%M")
+        try:
+            project.save()
+        except Exception as e:                                      # noqa: BLE001
+            return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+        return self._json(200, {"ok": True, "ticked": ticked, "page": page,
+                                "scope": scope_payload(page, sec["key"], project),
                                 "state": state_payload("", project)})
 
     def _export(self):
