@@ -461,4 +461,91 @@ main { display: flex; flex-direction: column; gap: 12px; }
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
+/* -------------------------------------------------------------- 工作台 */
+.workgrid { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; }
+@media (max-width: 1080px) { .workgrid { grid-template-columns: minmax(0, 1fr); } }
+
+.raillist { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.railitem {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; text-align: left; cursor: pointer;
+  font: inherit; color: var(--ink-dim);
+  padding: 7px 9px; border-radius: 10px;
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel-lo));
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge), inset 0 -2px 3px rgba(0,0,0,.16);
+}
+.railitem:hover { filter: brightness(1.07); }
+.railitem:disabled { opacity: .5; cursor: default; }
+.railitem .num {
+  width: 24px; height: 24px; flex: 0 0 24px;
+  display: grid; place-items: center;
+  border-radius: 7px; font-size: 11px; font-weight: 700;
+  color: var(--ink-dim);
+  background: radial-gradient(circle at 34% 28%, var(--card-hi), var(--card-lo) 75%);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge), inset 0 -2px 3px rgba(0,0,0,.3);
+}
+.railitem .rtxt { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.25; }
+.railitem .rtxt b { font-size: 12.5px; color: var(--ink); }
+.railitem .rtxt i { font-style: normal; font-size: 10.5px; color: var(--ink-mute);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.railitem .dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%;
+  background: var(--ink-mute); box-shadow: inset 0 1px 0 rgba(255,255,255,.4); }
+.railitem .dot.done { background: linear-gradient(180deg, #7ce0b0, #2aa06a); }
+.railitem .dot.asked, .railitem .dot.drafted {
+  background: linear-gradient(180deg, #f2d07a, #b8842a); }
+.railitem.sel {
+  color: var(--ink);
+  border-color: var(--accent-lo);
+  background: linear-gradient(180deg, var(--panel-hi), var(--card-lo));
+  box-shadow: inset 0 1px 0 var(--edge), 0 0 0 2px rgba(79,157,255,.22), 0 2px 6px rgba(0,0,0,.3);
+}
+
+.wdetail { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.wcols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+@media (max-width: 900px) { .wcols { grid-template-columns: minmax(0, 1fr); } }
+.wsec { display: flex; flex-direction: column; gap: 5px; }
+.wt { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: .2px; }
+.wt.ok { color: var(--ok); }
+.wt.bad { color: var(--bad); }
+.wt.muted { color: var(--ink-mute); }
+
+.kv { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--ink-dim); }
+.kv li { margin: 2px 0; }
+.kv.bad li { color: var(--warn); }
+.kv.muted li { color: var(--ink-mute); }
+.kv.check li { color: var(--ink-dim); }
+
+.box {
+  padding: 9px 11px; border-radius: 10px; font-size: 12.5px; color: var(--ink-dim);
+  white-space: pre-wrap; word-break: break-word;
+  background: linear-gradient(180deg, var(--groove-hi), var(--groove-lo));
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.35);
+}
+.box.warn { color: var(--warn); }
+
+.ta {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  padding: 8px 10px; border: 0; outline: 0; border-radius: 10px;
+  font: 12.5px/1.6 "Microsoft YaHei", "Segoe UI", sans-serif;
+  color: var(--ink); background: var(--select);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.35), inset 0 -1px 0 var(--edge);
+}
+.ta:focus { box-shadow: inset 0 2px 5px rgba(0,0,0,.35), 0 0 0 2px rgba(79,157,255,.3); }
+.ta:disabled { opacity: .6; }
+
+.qbox { margin: 5px 0 9px; padding: 9px 11px; border-radius: 11px;
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel-lo));
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge); }
+.qbox .q { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.qbox .why { font-size: 11.5px; color: var(--ink-mute); margin: 2px 0 6px; }
+
+.wactions { margin-top: 10px; }
+.finalextra { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; font-size: 12.5px; }
+.finalextra .box { font-size: 12.5px; }
+code { font: 12px Consolas, "Courier New", monospace; padding: 1px 5px; border-radius: 5px;
+  background: var(--panel-lo); border: 1px solid var(--line); }
+
 .empty { padding: 12px; font-size: 12.5px; color: var(--ink-mute); }

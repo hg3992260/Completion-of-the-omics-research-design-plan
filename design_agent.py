@@ -105,9 +105,20 @@ def clean_section(body: str) -> str:
 
 
 def parse_questions(block: str) -> list[dict]:
-    """把追问段落拆成 [{q, why}]。"""
+    """把追问段落拆成 [{q, why}]。
+
+    优先按行首编号 / 项目符号切分（模型的常规写法）；模型偶尔不编号，
+    此时退化成"一行一问" —— 但只在整段里**至少两行**带 `｜为什么` 时才这样拆，
+    以免把真正的换行续行切成两个问题。
+    """
+    text = block or ""
+    chunks = re.split(r"\n(?=\s*(?:\d+[.、)]|[-*·]))", text)
+    if len(chunks) < 2:
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if len([ln for ln in lines if re.search(r"[｜|]\s*为什么", ln)]) >= 2:
+            chunks = lines
     items = []
-    for raw in re.split(r"\n(?=\s*(?:\d+[.、)]|[-*·]))", block or ""):
+    for raw in chunks:
         line = raw.strip().lstrip("-*·").strip()
         line = re.sub(r"^\d+[.、)]\s*", "", line)
         if not line:

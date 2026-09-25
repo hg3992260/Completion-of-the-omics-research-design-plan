@@ -85,6 +85,55 @@ DEMO = """【收敛总览】素材集中在方法学与统计方案，结果与�
 3. 制定分割者一致性方案（ICC）。
 """
 
+KICKOFF = """【设计速读】这是一项诊断准确性研究：用增强 CT 的影像组学特征预测胰腺囊性病变的恶性，
+数据为单中心回顾性队列，回答的是"要不要手术"。属于诊断研究。
+【首要关注点】
+参考标准的病理定义 ｜ 阶段 2
+扫描期相与重建参数的统一 ｜ 阶段 4
+分割者一致性（ICC） ｜ 阶段 5
+【路线说明】接下来按十阶段标准流程逐个推进，每阶段先追问再改写。
+"""
+
+ASK = """【现状评估】你把人群、成像与建模流程都写了，但没有交代参考标准是术后病理还是随访，
+也没有说清扫描期相与重建核；这两点直接决定标签质量与纹理特征是否可比。
+【必须澄清的问题】
+参考标准如何定义？｜为什么问：结局定义决定标签质量，也决定事件率。
+扫描期相与重建核是什么？｜为什么问：纹理特征对期相与层厚敏感，影响 IBSI 可比性。
+【本阶段小结】回答这两点后即可把数据来源与参考标准写进方案。
+"""
+
+REWRITE = """【改写稿】本研究纳入 2016-01 至 2023-06 连续入组的胰腺囊性病变成人患者，
+参考标准为术后病理；未手术者以 24 个月随访影像进展为复合终点。
+所有纳入病例均为胰腺期（45-50 s）薄层 1 mm 重建，重建核统一为 B30f；
+对于 3 mm 层厚病例另做敏感性分析。分割由两名放射科医师独立完成，计算 ICC。
+【检查表】
+- [ ] 写明参考标准的定义与时间窗 ｜ 依据：CLEAR 8
+- [ ] 写明扫描期相、层厚与重建核 ｜ 依据：CLEAR 16、METRICS #6
+- [ ] 说明分割者一致性 ｜ 依据：METRICS #10
+【风险提示】层厚不统一会系统性偏移纹理特征，务必做敏感性分析。
+【下一步】进入阶段 3：样本量与事件数。
+"""
+
+FINALIZE = """【设计草案】
+一、研究问题：增强 CT 影像组学预测胰腺囊性病变恶性，辅助手术决策。
+二、数据与人群：2016-2023 单中心 212 例，参考标准为术后病理或 24 个月随访。
+三、影像与组学流程：胰腺期薄层 1 mm 重建，两名医师分割并计算 ICC，IBSI 编号提取特征。
+四、统计与建模：EPV≥10 估算样本量，多层感知机与逻辑回归对比，5 折交叉验证。
+五、验证策略：内部交叉验证 + 时间外部验证。
+六、预期产出：模型、校准曲线、决策曲线与可复现脚本。
+【待补数据清单】扫描参数、分割者 ICC、外部验证队列。
+【投稿前自查】按 CLEAR 逐条核对；按 TRIPOD+AI 报告模型细节；按 METRICS 报告分割一致性。
+"""
+
+# (提示词里的标记, 假输出, 动作名)
+CANNED = [
+    ("【设计速读】", KICKOFF, "kickoff"),
+    ("【改写稿】", REWRITE, "rewrite"),
+    ("【设计草案】", FINALIZE, "finalize"),
+    ("【收敛总览】", DEMO, "convergence"),
+    ("【现状评估】", ASK, "ask"),
+]
+
 
 class FakeClient(object):
     """假 LLM：不联网，但按真实协议分片回调，用来验证 SSE 通路与解析。"""
@@ -96,18 +145,29 @@ class FakeClient(object):
                     "temperature": 0.4, "max_tokens": 8000}
         self.calls = []
         self.messages = []
+        self.kinds = []
+
+    def _pick(self, messages):
+        """按提示词里要求的小标题判断这次是哪种动作，返回对应的假输出。"""
+        blob = "\n".join(m.get("content", "") for m in messages)
+        for marker, text, kind in CANNED:
+            if marker in blob:
+                return text, kind
+        return DEMO, "unknown"
 
     def chat(self, messages, stream=False, on_delta=None, temperature=None,
              max_tokens=None, reason=False):
         self.calls.append({"stream": stream, "reason": reason, "messages": len(messages)})
         self.messages = messages
+        text, kind = self._pick(messages)
+        self.kinds.append(kind)
         reasoning = "先通读全部素材，再按内容主题判断归属……" * 3
         if on_delta:
             for i in range(0, len(reasoning), 9):
                 on_delta(reasoning[i:i + 9], "reasoning")
-            for i in range(0, len(DEMO), 13):
-                on_delta(DEMO[i:i + 13], "content")
-        return {"content": DEMO, "reasoning": reasoning, "usage": {"total_tokens": 1234},
+            for i in range(0, len(text), 13):
+                on_delta(text[i:i + 13], "content")
+        return {"content": text, "reasoning": reasoning, "usage": {"total_tokens": 1234},
                 "model": self.model, "finish_reason": "stop", "elapsed": 1.5}
 
 
@@ -123,6 +183,16 @@ def get(url, timeout=10):
             return r.status, r.read().decode("utf-8", "ignore"), dict(r.headers)
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "ignore"), dict(e.headers or {})
+
+
+def get_bytes(url, timeout=30):
+    """需要原始字节的下载（docx 是 zip 包）。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "selftest"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
 
 
 def post(url, payload, timeout=30):
@@ -177,7 +247,7 @@ def main() -> int:
               all(('id="view-%s"' % k) in html for k in ("work", "stat", "shape", "ov")))
         check("含旧内核降级提示", 'id="compat"' in html)
 
-        for f, must in (("app.css", "--accent"), ("app.js", "runConvergence"),
+        for f, must in (("app.css", "--accent"), ("app.js", "streamAction"),
                         ("favicon.svg", "<svg")):
             code, body, hdr = get(base + "/static/" + f)
             check("GET /static/%s" % f, code == 200 and must in body, "code=%s" % code)
@@ -298,12 +368,153 @@ def main() -> int:
         code, body = post(base + "/api/project/delete", {"project": "不存在的课题"})
         check("删除不存在的项目返回 400", code == 400, "code=%s" % code)
 
-        # ---------------------------------------------------------- 6 离线/兼容
-        print("\n[5] 离线可用性与 Python 3.8 兼容")
+        # ---------------------------------------------------------- 6 工作台闭环
+        print("\n[5] 工作台闭环（速读 → 追问 → 回答 → 改写 → 采纳 → 汇总 → 导出）")
+
+        def sse(body):
+            out = []
+            for line in body.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        out.append(json.loads(line[5:].strip()))
+                    except ValueError:
+                        pass
+            return out
+
+        def last_done(body):
+            d = [e for e in sse(body) if e.get("type") == "done"]
+            return d[-1] if d else {}
+
+        def stage_of(payload, sid):
+            st = ((payload.get("state") or {}).get("overview") or {}).get("stages") or []
+            return next((s for s in st if s["id"] == sid), {})
+
+        raw_new = "回顾性收集 2016-2023 年单中心 212 例胰腺囊性病变增强 CT，做影像组学预测恶性。"
+        code, body = post(base + "/api/kickoff",
+                          {"project": "测试课题", "raw_design": raw_new})
+        d = last_done(body)
+        check("速读（kickoff）成功", code == 200 and d.get("ok"), body[:200])
+        check("速读解析出首要关注点", "阶段 2" in (d.get("focus") or ""),
+              str(d.get("focus"))[:120])
+        check("速读写入了原始设想",
+              (d.get("state") or {}).get("overview", {}).get("raw_len", 0) > 10,
+              str((d.get("state") or {}).get("overview", {}).get("raw_len")))
+        check("速读记入对话记录",
+              ((d.get("state") or {}).get("overview") or {}).get("transcript_len", 0) >= 1)
+        check("done 事件带整份 state（前端可整体重绘）",
+              len(((d.get("state") or {}).get("overview") or {}).get("stages") or []) == 10)
+
+        code, body = post(base + "/api/stage/ask", {"project": "测试课题", "sid": 1})
+        d = last_done(body)
+        st1 = stage_of(d, 1)
+        check("追问成功且解析出 2 条问题", d.get("ok") and d.get("questions") == 2,
+              json.dumps(d, ensure_ascii=False)[:200])
+        check("现状评估已保存", "参考标准" in (st1.get("assessment") or ""),
+              str(st1.get("assessment"))[:120])
+        check("问题带“为什么问”", bool((st1.get("questions") or [{}])[0].get("why")),
+              str(st1.get("questions"))[:160])
+        check("回答槽位与问题数一致",
+              len(st1.get("answers") or []) == 2 and (st1.get("answers") or [""])[0] == "",
+              str(st1.get("answers")))
+        check("阶段状态变为已追问", st1.get("status") == "asked", str(st1.get("status")))
+
+        ans = ["参考标准为术后病理；未手术者以 24 个月随访影像进展为复合终点。",
+               "胰腺期（45-50 s）薄层 1 mm 重建，重建核 B30f。"]
+        code, body = post(base + "/api/stage/answers",
+                          {"project": "测试课题", "sid": 1, "answers": ans})
+        j = json.loads(body)
+        check("只保存回答（不调用模型）",
+              code == 200 and (stage_of(j, 1).get("answers") or [""])[0].startswith("参考标准为术后病理"),
+              body[:160])
+
+        before = len(web_server.STATE["client"].calls)
+        code, body = post(base + "/api/stage/rewrite",
+                          {"project": "测试课题", "sid": 1, "answers": ans})
+        d = last_done(body)
+        st1 = stage_of(d, 1)
+        check("改写成功", code == 200 and d.get("ok") and d.get("kind") == "rewrite", body[:200])
+        check("改写稿已解析（>100 字）", (d.get("draft_len") or 0) > 100,
+              str(d.get("draft_len")))
+        check("检查表解析出 3 条", (d.get("checks") or 0) == 3, str(st1.get("checklist")))
+        check("风险提示已解析", "层厚" in (st1.get("risks") or ""),
+              str(st1.get("risks"))[:120])
+        check("下一步已解析", "阶段 3" in (st1.get("next") or ""), str(st1.get("next"))[:120])
+        check("状态变为待采纳", st1.get("status") == "drafted", str(st1.get("status")))
+        check("改写前的回答被写进项目",
+              (st1.get("answers") or [""])[1].startswith("胰腺期"), str(st1.get("answers")))
+        check("本轮调用走的是改写提示词",
+              web_server.STATE["client"].kinds[-1] == "rewrite",
+              str(web_server.STATE["client"].kinds))
+        check("改写确实调用了一次模型",
+              len(web_server.STATE["client"].calls) == before + 1)
+
+        final_text = (st1.get("draft") or "") + "\n（研究者补充：外部验证队列待确认。）"
+        code, body = post(base + "/api/stage/save",
+                          {"project": "测试课题", "sid": 1, "accept": True,
+                           "final": final_text, "answers": ans})
+        j = json.loads(body)
+        st1 = stage_of(j, 1)
+        check("采纳定稿成功", code == 200 and j.get("ok"), body[:200])
+        check("定稿内容与编辑一致", "研究者补充" in (st1.get("final") or ""),
+              str(st1.get("final"))[:120])
+        check("状态变为已完成", st1.get("status") == "done", str(st1.get("status")))
+
+        code, body = post(base + "/api/stage/save",
+                          {"project": "测试课题", "sid": 2,
+                           "raw_design": "改过的设想：多中心前瞻队列。"})
+        j = json.loads(body)
+        check("保存研究设想",
+              ((j.get("state") or {}).get("overview") or {}).get("raw_design") ==
+              "改过的设想：多中心前瞻队列。", body[:160])
+
+        code, body = post(base + "/api/finalize", {"project": "测试课题"})
+        d = last_done(body)
+        check("汇总草案成功", code == 200 and d.get("ok") and d.get("kind") == "finalize",
+              body[:200])
+        check("草案已写入项目（>200 字）", (d.get("final_len") or 0) > 200, str(d.get("final_len")))
+        check("待补数据清单已解析", "扫描参数" in (d.get("todo_list") or ""),
+              str(d.get("todo_list"))[:120])
+        check("投稿前自查已解析", "CLEAR" in (d.get("selfcheck") or ""),
+              str(d.get("selfcheck"))[:120])
+        check("汇总调用带更大 token 预算",
+              web_server.STATE["client"].kinds[-1] == "finalize",
+              str(web_server.STATE["client"].kinds))
+
+        code, md, hdr = get(base + "/api/export?project=" + urllib.parse.quote("测试课题") +
+                            "&fmt=md")
+        check("导出 Markdown 200", code == 200 and "# " in md, md[:120])
+        check("Markdown 含定稿内容", "研究者补充" in md)
+        check("Markdown 带下载头", "attachment" in (hdr.get("Content-Disposition") or ""),
+              str(hdr.get("Content-Disposition")))
+        check("Markdown 含各阶段标题", "十阶段" in md or "研究问题与设计" in md)
+
+        code, blob = get_bytes(base + "/api/export?project=" +
+                               urllib.parse.quote("测试课题") + "&fmt=docx")
+        if code == 501:
+            print("  –　跳过 Word 导出：本机没有 python-docx")
+        else:
+            check("导出 Word 200 且是 zip 包", code == 200 and blob[:2] == b"PK",
+                  "code=%s len=%s" % (code, len(blob)))
+        code, body, _ = get(base + "/api/export?project=" +
+                            urllib.parse.quote("测试课题") + "&fmt=pdf")
+        check("未知导出格式返回 400", code == 400, "code=%s" % code)
+        code, body, _ = get(base + "/api/export?project=%E4%B8%8D%E5%AD%98%E5%9C%A8&fmt=md")
+        check("导出不存在的项目返回 400", code == 400, "code=%s" % code)
+
+        # 工作台动作也受并发保护
+        web_server.RUN_LOCK.acquire()
+        try:
+            code, body = post(base + "/api/stage/ask", {"project": "测试课题", "sid": 1})
+            check("并发追问返回 409", code == 409, "code=%s %s" % (code, body[:120]))
+        finally:
+            web_server.RUN_LOCK.release()
+
+        # ---------------------------------------------------------- 7 离线/兼容
+        print("\n[6] 离线可用性与 Python 3.8 兼容")
         files = ["web_server.py", "web/index.html", "web/app.css", "web/app.js",
                  "启动_Web版.bat"]
         missing = [f for f in files if not os.path.exists(os.path.join(HERE, f))]
-        check("Phase 0 交付文件齐全", not missing, str(missing))
+        check("Web 版交付文件齐全", not missing, str(missing))
         for f in ("web/app.js", "web/app.css", "web/index.html"):
             txt = open(os.path.join(HERE, f), encoding="utf-8").read()
             bad = re.findall(r"https?://(?!127\.0\.0\.1|localhost)[\w.\-]+", txt)
@@ -325,8 +536,15 @@ def main() -> int:
                        and n.names[0].name.split(".")[0] not in stdlib
                        and n.names[0].name.split(".")[0] not in
                        ("app_paths", "coupling", "scope_core", "shape_data", "stat_data",
-                        "design_agent", "llm_client", "stages_data")]
+                        "design_agent", "llm_client", "stages_data", "docx_export")]
         check("web_server.py 只依赖标准库 + 本项目模块", not bad_imports, str(bad_imports))
+
+        # 追问解析的两种写法（编号 / 未编号）都必须是 2 条，不能被并成 1 条
+        import design_agent as _da
+        check("编号问题解析为 2 条",
+              len(_da.parse_questions("1. A 如何定义？｜为什么问：x\n2. B 是多少？｜为什么问：y")) == 2)
+        check("未编号问题也解析为 2 条",
+              len(_da.parse_questions("A 如何定义？｜为什么问：x\nB 是多少？｜为什么问：y")) == 2)
 
         # 用真机上的 3.8 解释器再编译一遍（有就跑，没有就跳过）
         py38 = None

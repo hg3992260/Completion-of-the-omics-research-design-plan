@@ -20,11 +20,21 @@ Windows 7 上连"内嵌浏览器"也走不通（WebView2 Runtime 109 是最后�
     GET  /                     单页界面（web/index.html）
     GET  /static/<file>        界面静态资源
     GET  /api/health           健康检查
-    GET  /api/state[?project=] 总览数据（项目列表 + 三条工作线 + 十阶段 + 缓存的收敛结论）
+    GET  /api/state[?project=] 整份界面状态（项目列表 + 十阶段完整内容 + 三条工作线 + 九阶段/七章 + 收敛结论）
+    GET  /api/export?fmt=md    导出 Markdown（无依赖）/ Word（需要 python-docx）→ 浏览器下载
     POST /api/project/new      新建空白项目
     POST /api/project/rename   项目改名
     POST /api/project/delete   删除项目
-    POST /api/convergence      收敛推理（SSE 流式：status / reasoning / content / done）
+    POST /api/kickoff          速读研究设想（SSE 流式，结果记入对话记录）
+    POST /api/stage/ask        追问（SSE 流式）
+    POST /api/stage/answers    只保存研究者的回答
+    POST /api/stage/rewrite    改写稿 + 检查表 + 风险提示（SSE 流式）
+    POST /api/stage/save       保存编辑内容 / 采纳定稿
+    POST /api/finalize         汇总完整设计草案（SSE 流式）
+    POST /api/convergence      收敛推理（SSE 流式）
+
+所有会改数据或调用模型的接口，成功时都会在 ``done`` 事件里回传整份 ``state``，
+前端因此不需要做局部状态同步 —— 收到就整体重绘。
 
 运行
 ----
@@ -51,13 +61,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from app_paths import APP_VERSION, is_frozen, resource_path        # noqa: E402
+from app_paths import APP_VERSION, app_home, is_frozen, resource_path   # noqa: E402
 
 import coupling                                                    # noqa: E402
 import scope_core                                                  # noqa: E402
 import shape_data                                                  # noqa: E402
 import stat_data                                                   # noqa: E402
-from design_agent import DesignAgent, Project, parse_convergence    # noqa: E402
+from design_agent import (DesignAgent, Project, parse_checklist,    # noqa: E402
+                          parse_convergence, parse_questions, parse_sections, pick)
 from llm_client import LLMClient, load_config, mask                 # noqa: E402
 from stages_data import STAGES                                      # noqa: E402
 
@@ -150,6 +161,7 @@ def _scope_rows(store: dict, data: list) -> list:
 
 
 def _stage_rows(project) -> list:
+    """十阶段的**完整**内容（含追问/回答/稿子/检查表），工作台视图据此渲染与编辑。"""
     rows = []
     for s in STAGES:
         st = (getattr(project, "stages", None) or {}).get(str(s["id"])) or {}
@@ -157,21 +169,35 @@ def _stage_rows(project) -> list:
         body = (st.get("final") or st.get("draft") or "").strip()
         rows.append({
             "id": s["id"], "title": s["title"], "spec": s.get("spec", ""),
-            "goal": (s.get("goal") or "")[:200], "status": status,
+            "goal": s.get("goal", ""),
+            "actions": list(s.get("actions") or []),
+            "reports": list(s.get("reports") or []),
+            "pitfalls": list(s.get("pitfalls") or []),
+            "refs": list(s.get("refs") or []),
+            "status": status,
             "label": scope_core.STATUS_LABEL.get(status, status),
+            "assessment": st.get("assessment", ""),
+            "questions": [q if isinstance(q, dict) else {"q": str(q), "why": ""}
+                          for q in (st.get("questions") or [])],
+            "answers": list(st.get("answers") or []),
+            "draft": st.get("draft", ""),
+            "final": st.get("final", ""),
+            "risks": st.get("risks", ""),
+            "next": st.get("next", ""),
+            "checklist": list(st.get("checklist") or []),
+            "model": st.get("model", ""),
+            "updated": st.get("updated", ""),
             "body_len": len(body),
             "is_final": bool((st.get("final") or "").strip()),
-            "questions": len(st.get("questions") or []),
-            "answers": len([a for a in (st.get("answers") or []) if str(a).strip()]),
-            "checks": len(st.get("checklist") or []),
-            "updated": st.get("updated", ""),
         })
     return rows
 
 
-def state_payload(sel: str) -> dict:
+def state_payload(sel: str, project=None) -> dict:
+    """整份界面状态。每次写操作后都回传一次，前端只管整体重绘，不做局部状态同步。"""
     metas = Project.list_all()
-    project = resolve_project(sel)
+    if project is None:
+        project = resolve_project(sel)
     out = {
         "ok": True, "app": APP_TITLE, "version": APP_VERSION,
         "python": sys.version.split()[0], "frozen": is_frozen(),
@@ -209,6 +235,7 @@ def state_payload(sel: str) -> dict:
             "shape_checks": scope_core.total_checks(shape_data.SHAPE),
         },
         "transcript_len": len(getattr(project, "transcript", None) or []),
+        "final_doc": getattr(project, "final_doc", "") or "",
     }
     out["convergence"] = getattr(project, "convergence", None) or {}
     return out
@@ -336,6 +363,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "llm": llm_info()})
         if path == "/api/state":
             return self._json(200, state_payload(self._query().get("project", "")))
+        if path == "/api/export":
+            return self._export()
         return self._json(404, {"ok": False, "error": "unknown path %s" % path})
 
     def _static(self, rel: str):
@@ -363,7 +392,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._project_rename()
         if path == "/api/project/delete":
             return self._project_delete()
-        if path == "/api/convergence":
+        if path == "/api/kickoff":                   # 速读研究设想（SSE）
+            return self._kickoff()
+        if path == "/api/stage/ask":                 # 追问（SSE）
+            return self._stage_ask()
+        if path == "/api/stage/rewrite":             # 改写（SSE）
+            return self._stage_rewrite()
+        if path == "/api/stage/answers":             # 只存回答（JSON）
+            return self._stage_answers()
+        if path == "/api/stage/save":                # 存编辑内容 / 采纳定稿（JSON）
+            return self._stage_save()
+        if path == "/api/finalize":                  # 汇总完整草案（SSE）
+            return self._finalize()
+        if path == "/api/convergence":               # 收敛推理（SSE）
             return self._convergence()
         return self._json(404, {"ok": False, "error": "unknown path %s" % path})
 
@@ -436,11 +477,22 @@ class Handler(BaseHTTPRequestHandler):
             self._write_sse({"type": kind, "text": piece})
         self._buf = []
 
-    def _convergence(self):
+    # -- LLM 动作（统一走 SSE 推流）------------------------------------------
+    def _llm_action(self, kind, build, apply_fn, reason=False, max_tokens=None,
+                    status="", pre_fn=None):
+        """跑一次 LLM 调用并把结果以 SSE 推给浏览器。
+
+        * ``build(agent, ctx)``    组装 messages（用桌面版同一套提示词）
+        * ``pre_fn(project, ctx)`` 调用前的落库（例如先把研究者的回答存下来）
+        * ``apply_fn(project, out, ctx)`` 解析并落库，返回给前端的附加字段
+        ``ctx`` = {"sid": 阶段号, "body": 请求体}。
+        结束后统一回传 ``state``（整份界面状态），前端只管整体重绘。
+        """
         body = self._body()
+        ctx = {"sid": self._sid(body), "body": body}
         project = resolve_project(body.get("project") or "")
         if project is None:
-            return self._json(400, {"ok": False, "error": "没有可推理的项目"})
+            return self._json(400, {"ok": False, "error": "没有可操作的项目"})
         if not RUN_LOCK.acquire(False):
             return self._json(409, {"ok": False, "error": "已有一次推理在进行中，请稍候"})
         try:
@@ -448,21 +500,29 @@ class Handler(BaseHTTPRequestHandler):
             info = llm_info()
             if not info["ready"]:
                 self._write_sse({"type": "error",
-                                 "text": "未配置 API Key：请在 GUI 的「设置」里填写，"
+                                 "text": "未配置 API Key：请在桌面版「设置」里填写，"
                                          "或设置环境变量 DEEPSEEK_API_KEY"})
                 self._write_sse({"type": "done", "ok": False})
                 return
+            if pre_fn is not None:
+                try:
+                    pre_fn(project, ctx)
+                    project.save()
+                except Exception as e:                              # noqa: BLE001
+                    self._write_sse({"type": "error",
+                                     "text": "保存输入失败：%s: %s" % (type(e).__name__, e)})
+                    self._write_sse({"type": "done", "ok": False})
+                    return
             self._write_sse({"type": "status",
-                             "text": "已连接 %s · reason 模式（温度 0，推理过程实时显示）"
-                                     % info["model"]})
+                             "text": (status or "%(model)s") % {"model": info["model"]}})
             agent = DesignAgent(client(), project)
 
-            def on_delta(piece, kind):
-                self._emit("reasoning" if kind == "reasoning" else "content", piece)
+            def on_delta(piece, k):
+                self._emit("reasoning" if k == "reasoning" else "content", piece)
 
             try:
-                out = client().chat(agent.convergence_messages(), stream=True,
-                                    on_delta=on_delta, reason=True)
+                out = client().chat(build(agent, ctx), stream=True, on_delta=on_delta,
+                                    reason=reason, max_tokens=max_tokens)
             except Exception as e:                                  # noqa: BLE001
                 self._flush_sse()
                 self._write_sse({"type": "error",
@@ -470,24 +530,231 @@ class Handler(BaseHTTPRequestHandler):
                 self._write_sse({"type": "done", "ok": False})
                 return
             self._flush_sse()
-            text = out.get("content") or ""
-            data = parse_convergence(text)
-            data["updated"] = time.strftime("%Y-%m-%d %H:%M")
-            data["model"] = out.get("model", "")
-            data["elapsed"] = round(float(out.get("elapsed") or 0), 1)
-            data["reasoning"] = (out.get("reasoning") or "")[:8000]
-            project.convergence = data
+            extra = {}
+            try:
+                extra = apply_fn(project, out, ctx) or {}
+            except Exception as e:                                  # noqa: BLE001
+                self._write_sse({"type": "error",
+                                 "text": "解析模型输出失败：%s: %s" % (type(e).__name__, e)})
+                self._write_sse({"type": "done", "ok": False})
+                return
             saved, err = True, ""
             try:
                 project.save()
             except Exception as e:                                  # noqa: BLE001
                 saved, err = False, "%s: %s" % (type(e).__name__, e)
-            self._write_sse({"type": "done", "ok": True, "saved": saved, "save_error": err,
-                             "convergence": data, "usage": out.get("usage") or {},
-                             "chapters": len(data.get("chapters") or []),
-                             "actions": len(data.get("actions") or [])})
+            payload = {"type": "done", "ok": True, "kind": kind, "sid": ctx["sid"],
+                       "saved": saved, "save_error": err,
+                       "usage": out.get("usage") or {}, "model": out.get("model", ""),
+                       "elapsed": round(float(out.get("elapsed") or 0), 1),
+                       "content": out.get("content") or "",
+                       "reasoning": (out.get("reasoning") or "")[:8000],
+                       "state": state_payload("", project)}
+            payload.update(extra)
+            self._write_sse(payload)
         finally:
             RUN_LOCK.release()
+
+    # -- 各动作 -------------------------------------------------------------
+    def _sid(self, body) -> int:
+        try:
+            return max(1, min(len(STAGES), int(body.get("sid") or 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def _convergence(self):
+        def apply_fn(project, out, ctx):
+            data = parse_convergence(out.get("content") or "")
+            data["updated"] = time.strftime("%Y-%m-%d %H:%M")
+            data["model"] = out.get("model", "")
+            data["elapsed"] = round(float(out.get("elapsed") or 0), 1)
+            data["reasoning"] = (out.get("reasoning") or "")[:8000]
+            project.convergence = data
+            return {"convergence": data,
+                    "chapters": len(data.get("chapters") or []),
+                    "actions": len(data.get("actions") or [])}
+
+        return self._llm_action(
+            "convergence", lambda a, c: a.convergence_messages(), apply_fn, reason=True,
+            status="已连接 %(model)s · reason 模式（温度 0，推理过程实时显示）")
+
+    def _kickoff(self):
+        """速读研究设想：先存下原始设想，再让模型给出速读与首要关注点（记入对话记录）。"""
+        def pre_fn(project, ctx):
+            raw = ctx["body"].get("raw_design")
+            if isinstance(raw, str):
+                project.raw_design = raw.strip()
+
+        def apply_fn(project, out, ctx):
+            sec = parse_sections(out.get("content") or "")
+            DesignAgent(client(), project).record("agent", out.get("content") or "",
+                                                  None, "速读")
+            return {"read": pick(sec, "设计速读"),
+                    "focus": pick(sec, "首要关注点"),
+                    "route": pick(sec, "路线说明")}
+
+        return self._llm_action("kickoff", lambda a, c: a.kickoff_messages(), apply_fn,
+                                pre_fn=pre_fn, status="正在速读研究设想 · %(model)s")
+
+    def _stage_ask(self):
+        def build(agent, ctx):
+            return agent.ask_messages(ctx["sid"])
+
+        def apply_fn(project, out, ctx):
+            sid = ctx["sid"]
+            st = project.stage(sid)
+            sec = parse_sections(out.get("content") or "")
+            st["assessment"] = pick(sec, "现状评估")
+            st["questions"] = parse_questions(pick(sec, "必须澄清", "问题"))
+            st["answers"] = ["" for _ in st["questions"]]
+            st["status"] = "asked"
+            st["model"] = out.get("model", "")
+            st["updated"] = time.strftime("%H:%M")
+            return {"questions": len(st["questions"]),
+                    "assessment_len": len(st["assessment"])}
+
+        return self._llm_action("ask", build, apply_fn,
+                                status="第 %(model)s · 正在生成现状评估与追问")
+
+    def _stage_answers(self):
+        """只存研究者的回答（不调用模型），供「先存草稿」用。"""
+        body = self._body()
+        project = resolve_project(body.get("project") or "")
+        if project is None:
+            return self._json(400, {"ok": False, "error": "没有可操作的项目"})
+        sid = self._sid(body)
+        st = project.stage(sid)
+        answers = body.get("answers")
+        if isinstance(answers, list):
+            st["answers"] = [str(a or "").strip() for a in answers]
+        try:
+            project.save()
+        except Exception as e:                                      # noqa: BLE001
+            return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+        return self._json(200, {"ok": True, "sid": sid,
+                                "state": state_payload("", project)})
+
+    def _stage_rewrite(self):
+        def build(agent, ctx):
+            return agent.rewrite_messages(ctx["sid"])
+
+        def pre_fn(project, ctx):
+            answers = ctx["body"].get("answers")
+            if isinstance(answers, list):       # 先落盘再改写，中途出错也不丢回答
+                project.stage(ctx["sid"])["answers"] = [str(a or "").strip()
+                                                        for a in answers]
+
+        def apply_fn(project, out, ctx):
+            sid = ctx["sid"]
+            st = project.stage(sid)
+            sec = parse_sections(out.get("content") or "")
+            st["draft"] = pick(sec, "改写稿")
+            st["risks"] = pick(sec, "风险提示")
+            st["checklist"] = parse_checklist(pick(sec, "检查表"))
+            st["next"] = pick(sec, "下一步")
+            st["status"] = "drafted" if st["draft"] else st.get("status", "asked")
+            st["updated"] = time.strftime("%H:%M")
+            return {"draft_len": len(st["draft"]), "checks": len(st["checklist"])}
+
+        return self._llm_action("rewrite", build, apply_fn, pre_fn=pre_fn,
+                                status="第 %(model)s · 正在生成改写稿与检查表")
+
+    def _finalize(self):
+        def apply_fn(project, out, ctx):
+            sec = parse_sections(out.get("content") or "")
+            project.final_doc = pick(sec, "设计草案") or (out.get("content") or "")
+            return {"final_len": len(project.final_doc),
+                    "todo_list": pick(sec, "待补数据"),
+                    "selfcheck": pick(sec, "投稿前自查")}
+
+        return self._llm_action("finalize", lambda a, c: a.finalize_messages(), apply_fn,
+                                max_tokens=14000,
+                                status="正在把各阶段定稿整合成完整草案 · %(model)s")
+
+    def _stage_save(self):
+        """保存阶段的编辑内容（定稿框 / 草稿框 / 状态），不调用模型。"""
+        body = self._body()
+        project = resolve_project(body.get("project") or "")
+        if project is None:
+            return self._json(400, {"ok": False, "error": "没有可操作的项目"})
+        sid = self._sid(body)
+        st = project.stage(sid)
+        for key in ("final", "draft", "risks", "assessment"):
+            if isinstance(body.get(key), str):
+                st[key] = body[key].strip()
+        if isinstance(body.get("answers"), list):
+            st["answers"] = [str(a or "").strip() for a in body["answers"]]
+        if isinstance(body.get("checklist"), list):
+            st["checklist"] = [str(c) for c in body["checklist"]]
+        if body.get("status") in ("todo", "asked", "drafted", "done"):
+            st["status"] = body["status"]
+        if body.get("accept"):                  # 采纳：把定稿框内容当定稿收录
+            st["final"] = (body.get("final") or st.get("draft") or "").strip()
+            st["status"] = "done"
+        if body.get("to_draft") and not st.get("draft"):
+            st["draft"] = st.get("final", "")
+        st["updated"] = time.strftime("%H:%M")
+        raw = body.get("raw_design")
+        if isinstance(raw, str):
+            project.raw_design = raw.strip()
+        try:
+            project.save()
+        except Exception as e:                                      # noqa: BLE001
+            return self._json(500, {"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+        return self._json(200, {"ok": True, "sid": sid, "status": st["status"],
+                                "state": state_payload("", project)})
+
+    def _export(self):
+        """导出 Markdown / Word（走浏览器下载；Word 需要 python-docx）。"""
+        q = self._query()
+        project = resolve_project(q.get("project") or "")
+        if project is None:
+            return self._json(400, {"ok": False, "error": "没有可导出的项目"})
+        fmt = (q.get("fmt") or "md").lower()
+        safe = Project.sanitize(project.name)
+        if fmt in ("md", "markdown"):
+            body = project.render_doc().encode("utf-8")
+            name = "研究设计_%s.md" % safe
+            return self._send(200, "text/markdown; charset=utf-8", body,
+                              self._dl_headers(name))
+        if fmt in ("docx", "word"):
+            try:
+                import docx_export
+            except Exception as e:                                  # noqa: BLE001
+                return self._json(501, {
+                    "ok": False,
+                    "error": "导出 Word 需要 python-docx：%s。请执行 pip install python-docx，"
+                             "或改用 Markdown 导出（无需任何依赖）。" % e})
+            tmp = os.path.join(app_home(), "_export_tmp")
+            try:
+                os.makedirs(tmp, exist_ok=True)
+            except Exception:                                       # noqa: BLE001
+                tmp = app_home()
+            path = os.path.join(tmp, "研究设计_%s.docx" % safe)
+            try:
+                path = docx_export.build(project, path)
+                with open(path, "rb") as fh:
+                    body = fh.read()
+            except Exception as e:                                  # noqa: BLE001
+                return self._json(500, {"ok": False,
+                                        "error": "生成 Word 失败：%s: %s"
+                                                 % (type(e).__name__, e)})
+            finally:
+                try:
+                    os.remove(path)
+                except Exception:                                   # noqa: BLE001
+                    pass
+            return self._send(200,
+                              "application/vnd.openxmlformats-officedocument."
+                              "wordprocessingml.document",
+                              body, self._dl_headers("研究设计_%s.docx" % safe))
+        return self._json(400, {"ok": False, "error": "fmt 只支持 md / docx"})
+
+    @staticmethod
+    def _dl_headers(name: str) -> dict:
+        return {"Content-Disposition":
+                "attachment; filename=\"design.%s\"; filename*=UTF-8''%s"
+                % (os.path.splitext(name)[1].lstrip("."), quote(name))}
 
 
 # --------------------------------------------------------------------------- 启动

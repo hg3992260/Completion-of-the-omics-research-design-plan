@@ -49,15 +49,50 @@
     <section class="view" id="view-work" hidden>
       <div class="card">
         <div class="cardhead">
-          <h2>设计工作台 <small>十阶段</small></h2>
-          <span class="tag">Phase 1 接入编辑与追问</span>
+          <h2>研究设想 <small>原始输入</small></h2>
+          <button id="btnRawSave" class="btn" type="button">保存设想</button>
         </div>
-        <p class="hint">本页在 Phase 0 是<b>只读</b>预览：阶段状态、定稿字数、追问与自检数量都直接读自项目文件。</p>
-        <div class="rawbox">
-          <div class="rlabel">研究设想（原始输入）</div>
-          <pre id="rawDesign" class="raw">（空）</pre>
+        <p class="hint">把初步的实验设计贴进来 —— 后面每个阶段的追问与改写都以它为前提。</p>
+        <textarea id="rawDesign" class="ta" rows="4"
+                  placeholder="例如：回顾性收集 2016-2023 年单中心 212 例胰腺囊性病变增强 CT，提取影像组学特征，构建预测恶性的模型，并与 Fukuoka 指南高危征象做对比。"></textarea>
+        <div class="row wactions">
+          <button id="btnKickoff" class="btn primary" type="button">从头开始（速读 + 首要关注点）</button>
+          <button id="btnWorkStop" class="btn ghost" type="button" hidden>停止</button>
+          <span id="rawMeta" class="meta"></span>
         </div>
-        <div id="workStages" class="stagerows"></div>
+      </div>
+
+      <div class="workgrid">
+        <div class="card railcard">
+          <div class="cardhead"><h2>十阶段</h2><span id="workCount" class="tag"></span></div>
+          <div id="stageRail" class="raillist"></div>
+        </div>
+
+        <div class="card workcard">
+          <div class="cardhead">
+            <h2 id="wTitle">选择一个阶段</h2>
+            <span id="wState" class="tag"></span>
+          </div>
+          <div id="wSpec" class="hint"></div>
+          <div id="wDetail" class="wdetail"></div>
+          <div id="wLive" class="live" hidden>
+            <div class="livelabel">实时输出（弱化色为推理过程）</div>
+            <pre id="wText" class="livetext"></pre>
+          </div>
+          <div id="wActions" class="row wactions"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardhead">
+          <h2>完整设计草案 <small>汇总各阶段定稿</small></h2>
+          <button id="btnFinalize" class="btn" type="button">生成完整草案</button>
+          <a id="dlMd" class="btn ghost" href="#" download>导出 Markdown</a>
+          <a id="dlDocx" class="btn ghost" href="#" download>导出 Word</a>
+        </div>
+        <p class="hint">Markdown 导出不需要任何依赖；Word 导出需要目标机装了 <code>python-docx</code>。</p>
+        <pre id="finalDoc" class="raw">（还没有生成）</pre>
+        <div id="finalExtra" class="finalextra"></div>
       </div>
     </section>
 
@@ -86,7 +121,8 @@
     </section>
 
     <!-- ============================ 总览 ============================ -->
-    <section class="view" id="view-ov">      <div class="grid2">
+    <section class="view" id="view-ov">
+      <div class="grid2">
         <div class="card conv">
           <div class="cardhead">
             <h2>收敛推理 <small>由模型自行判断各章来源与缺口</small></h2>
