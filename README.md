@@ -1,12 +1,13 @@
 # 组学研究工具包：设计工作台 + 标准流程管线
 
-两个 PyCt6 / PySide6 桌面程序，共用一个十阶段标准流程知识库（CLEAR / METRICS / TRIPOD+AI / PROBAST+AI /
+桌面版（PyCt6 / PySide6）与 Web 预览版共用一个十阶段标准流程知识库（CLEAR / METRICS / TRIPOD+AI / PROBAST+AI /
 CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 | 程序 | 作用 | 启动 |
 |---|---|---|
-| **`design_studio.py`** | **主界面**：贴入初步实验设计 → LLM agent 按十阶段逐段追问与改写 → 输出可执行研究设计 | `启动_设计工作台.bat` |
+| **`design_studio.py`** | **主界面（桌面版）**：贴入初步实验设计 → LLM agent 按十阶段逐段追问与改写 → 输出可执行研究设计 | `启动_设计工作台.bat` |
 | `omics_pipeline.py` | 管线视图：十阶段检查表、评分与自评进度 | `启动.bat` |
+| **`web_server.py`** | **Web 版（Phase 0 预览）**：本地服务 + 浏览器界面，**Windows 7 上也能用**（无需 Qt） | `启动_Web版.bat` |
 
 ![设计工作台](_shots/studio_01_draft_dark.png)
 
@@ -16,6 +17,9 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 **当前版本：`v1.1.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+> **开发中（未发布）**：**Web 版 Phase 0** —— `web_server.py` + `web/`，本地服务 + 浏览器界面，
+> 让 Windows 7 也能用上完整界面（Qt 6 与 WebView2 都不支持 Win7）。见「八、Web 版」。
 
 ### v1.1.1 · Windows 7 支持说明 + 仅 API 构建
 
@@ -71,7 +75,8 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 | 用途 | 最低系统 | 原因 |
 |---|---|---|
-| **图形界面**（`design_studio.py` / `omics_pipeline.py` / 合并版 exe） | **Windows 10 / 11（64 位）** | 界面基于 PySide6 6.x（**Qt 6 不支持 Windows 7**）；构建用的 Python ≥ 3.9 也已放弃 Win7 |
+| **图形界面（桌面版）**（`design_studio.py` / `omics_pipeline.py` / 合并版 exe） | **Windows 10 / 11（64 位）** | 界面基于 PySide6 6.x（**Qt 6 不支持 Windows 7**）；构建用的 Python ≥ 3.9 也已放弃 Win7 |
+| **Web 版**（`web_server.py` + 浏览器） | **Windows 7 SP1** 可行 | 无 Qt 依赖，纯标准库服务 + 系统浏览器；用 **Python 3.8** 即可（见下） |
 | **推理 API**（`api_server.py`） | Windows 7 **SP1** 可行 | 无 Qt 依赖；用 **Python 3.8** 构建即可（见下） |
 | **MCP 服务**（`mcp_server.py`） | 取决于 `mcp` 包的 Python 下限 | 一般要求 ≥ 3.10 |
 | macOS | macOS 11+ | PySide6 6.x 要求 |
@@ -93,25 +98,40 @@ python _check_win_target.py D:\python\envs\mar\python311.dll
 python _check_win_target.py <某个 Python 3.8 环境的>\python38.dll
 ```
 
-**单独补一个 `api-ms-win-core-path-l1-1-0.dll` 解决不了问题**：图形界面还卡在 Qt 6
+**单独补一个 `api-ms-win-core-path-l1-1-0.dll` 解决不了问题**：桌面版还卡在 Qt 6
 （Qt 5.15 是最后一个支持 Win7 的版本），而本项目界面基于 PySide6 6.x + PyCt6，无法降到 Qt 5。
+**但界面并非只能在 Win10 上用** —— 见下一节的 Web 版。
 
 ### 目标机是 Windows 7 时怎么做
 
-1. **只需要推理 API**（把 Win7 机器当作 OpenAI 兼容服务端，供 Win10 机器或其他客户端调用）：
+1. **要图形界面**：用 **Web 版**（`启动_Web版.bat`）—— 本机起一个 127.0.0.1 的服务，
+   用系统里已有的浏览器当界面，**完全不需要 Qt**，Python 3.8 即可。详见「八、Web 版」。
+2. **只需要推理 API**（把 Win7 机器当作 OpenAI 兼容服务端，供其他客户端调用）：
    运行 **`编译_Win7_API版.bat`** —— 用 Python 3.8 打包 `api_server.py`，
    **不含 Qt**，并在 spec 里排除 `PySide6 / shiboken6 / PyCt6 / mcp / docx` 整条链路。
    目标机需要：Win7 **SP1**(x64) + **KB2533623** + **KB2999226**(UCRT) + **VC++ 2015-2019 运行库**(x64)。
    构建机需要：Python **3.8**（`py -3.8 -m pip install "pyinstaller==6.10" certifi`；
    PyInstaller 6.11+ 要求 ≥3.9，故 3.8 上请用 6.10 或 5.13）。
-2. **需要图形界面**：升级到 Windows 10/11；或在一台 Win10 机器上运行主程序，
-   用 `PCLRadiomics.exe api --port 8788` / `mcp` 让 Win7 机器以客户端方式使用。
-3. 任何构建完成后都建议自检一次：
+3. **既不想装浏览器也不想升级系统**：在一台 Win10 机器上跑桌面版，让 Win7 机器通过
+   `--host 0.0.0.0 --token …` 以客户端方式使用。
+4. 任何构建完成后都建议自检一次：
 
    ```bat
    python _check_win_target.py dist\PCLRadiomicsAPI\PCLRadiomicsAPI.exe
    :: ✓ 未发现 Win8+/Win10+ 专有 API set  → 该产物可以在 Win7 上跑
    ```
+
+### 为什么 Win7 上"内嵌浏览器"走不通，只能用系统浏览器
+
+| 形态 | Win7 可行性 | 依据 |
+|---|---|---|
+| **本地服务 + 系统浏览器**（本项目采用） | ✅ | 界面能力 = 浏览器能力，无需任何内嵌组件 |
+| 内嵌 WebView2 | ❌ | WebView2 Runtime **109 是最后一个支持 Win7 的版本**，SDK ≥ 1.0.1519.0 已不支持 Win7/8.1；固定版 >109 在 Win7 上直接无法启动（[Microsoft Edge 博客](https://blogs.windows.com/msedgedev/2022/12/09/microsoft-edge-and-webview2-ending-support-for-windows-7-and-windows-8-8-1/)） |
+| pywebview + MSHTML（IE11 内核） | ⚠️ 降级 | 能跑，但没有 SSE / flex / grid，界面要退回 ES5 + 轮询 |
+| Electron / 新版 CEF | ❌ / ⚠️ | 新 Chromium 不支持 Win7；老 Electron(≤22)、老 CEF 分支同样 EOL 且包体 +100 MB |
+
+浏览器侧：Chrome **109** / Edge **109** 是最后支持 Win7 的版本（2023-01 起停支持），
+Firefox **115 ESR** 是 Win7 上最后的 Firefox —— 三者都能跑现代 CSS/SSE，界面无需降级。
 
 ---
 
@@ -606,9 +626,64 @@ git push -u origin main
 | `projects/` | 课题项目存档（JSON，自动保存） |
 | `llm_config.json` | 非敏感配置（模型、温度、预算）；密钥仅在手工填写时写入 |
 | `启动_设计工作台.bat` / `启动.bat` | 一键启动（自动选用已装 PyCt6 的解释器） |
+| `web_server.py` | **Web 版内核**（Phase 0）：纯标准库本地服务，把项目/总览/收敛推理以 HTTP + SSE 暴露给浏览器；无 Qt 依赖、Python 3.8 兼容 |
+| `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），四个视图 + 流程条 + 收敛推理实时输出；**无任何外链资源**，离线可用 |
+| `启动_Web版.bat` | Web 版一键启动：找 Python（3.8 起）→ 起服务 → 优先用 Chrome/Edge/Firefox 打开界面 |
 | `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
 
 数据与界面完全分离：`stages_data.py` 换内容，`design_agent.py` 换提示词，UI 不用改。
+
+---
+
+## 八、Web 版（浏览器界面，Windows 7 可用）
+
+**形态**：本机起一个只绑 `127.0.0.1` 的服务，双击后自动用系统浏览器打开界面。
+不需要 Qt、不需要内嵌浏览器组件，**Windows 7 SP1 + Python 3.8 就能用**。
+
+```bat
+:: 双击即可（自动挑 Chrome/Edge/Firefox 打开，默认端口 8787）
+启动_Web版.bat
+
+:: 等价于
+python web_server.py
+python web_server.py --port 8899 --no-browser --verbose
+python web_server.py --project 卵巢癌          :: 启动即选中某个课题
+python web_server.py --browser "C:\Program Files\Mozilla Firefox\firefox.exe"
+```
+
+| 端点 | 作用 |
+|---|---|
+| `GET /` | 单页界面（四个视图：工作台 / 统计 / SCI 结构 / 总览） |
+| `GET /api/health` | 健康检查：版本、Python、模型、密钥（脱敏） |
+| `GET /api/state[?project=…]` | 总览数据：项目列表、三条工作线进度、十阶段、九阶段/七章状态、缓存的收敛结论 |
+| `POST /api/project/new` / `rename` / `delete` | 项目管理（复用桌面版同一套 `Project` 代码与落盘格式） |
+| `POST /api/convergence` | **收敛推理**：SSE 流式返回 `status / reasoning / content / done`，完成后把结论写回项目文件 |
+
+**关键设计（与桌面版共用一套逻辑）**：`web_server.py` 只做"服务 + 界面"，
+业务判断一行不改 —— 项目读写走 `design_agent.Project`，收敛推理走
+`DesignAgent.convergence_messages()` + `LLMClient(reason=True)`，进度统计走 `coupling`，
+勾选/状态走 `scope_core`。因此代码里同样**没有任何章节↔阶段的映射表**，
+"哪条内容支撑哪一章、还缺什么"仍由模型在推理模式下自行判断。
+
+**Phase 0 的范围**（本次打通验证）：四个视图全部可看（工作台原始设想 + 十阶段状态、
+统计九阶段、SCI 七章、总览），项目管理可用，**总览的收敛推理可跑通（SSE + reason 模式）**。
+工作台/统计/SCI 三页的**编辑与引导式对话**属于后续阶段，界面上已标注。
+
+```bat
+:: Web 版自检：58 项（接口 / 静态资源 / SSE 推理 / 项目管理 / 离线性 / Python 3.8 兼容）
+python _test_web.py
+
+:: 渲染核对：造演示项目 → 起服务 → 无头 Chrome 截图 6 张 + 核对渲染后的 DOM（17 项）
+python _probe_web.py
+::   截图落在 _shots\web_*.png（深浅两色、宽窄两档）
+::   注意：无头 Chrome 需要命名管道，受限沙箱里会被拒绝，需放宽权限后运行
+```
+
+> **兼容性**：界面用 `fetch` + `ReadableStream` 读 SSE、CSS 变量与 Grid 布局，
+> 需要 Chrome 109 / Edge 109 / Firefox 115 ESR 及以上（Win7 上的最后一批现代浏览器）。
+> IE11 打开时不会白屏，而是显示一条"请更换浏览器"的提示。
+
+---
 
 ## 四、自检命令
 
@@ -630,6 +705,12 @@ D:\python\envs\mar\python.exe _check_overlap.py
 
 :: 主题一致性：浅色 → 深色 → 浅色，逐控件查冻结色与"前景=背景"，并做像素级对比度验收
 D:\python\envs\mar\python.exe _check_theme.py
+
+:: Web 版：58 项自检（接口 / 静态资源 / SSE 收敛推理 / 项目管理 / 离线无外链 / Python 3.8 兼容）
+D:\python\envs\mar\python.exe _test_web.py
+
+:: Web 版：真实浏览器渲染核对（无头 Chrome 截图 6 张 + 渲染后 DOM 判定 17 项）
+D:\python\envs\mar\python.exe _probe_web.py
 
 :: 收敛推理（reason 模式）：素材摘要 → 模型自行判断各章来源/缺口/就绪度
 D:\python\envs\mar\python.exe _test_convergence.py

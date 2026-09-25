@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>组学研究设计工作台 · Web 预览版</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">PCL</span>
+      <span class="titles">
+        <b>组学研究设计工作台</b>
+        <i id="verLine">Web 预览版 · 加载中…</i>
+      </span>
+    </div>
+
+    <div class="projbar">
+      <label for="projSel">课题</label>
+      <div class="groove">
+        <select id="projSel" aria-label="选择课题"></select>
+      </div>
+      <button id="btnNew" class="btn" type="button">新建</button>
+      <button id="btnRename" class="btn ghost" type="button">改名</button>
+      <button id="btnDelete" class="btn ghost danger" type="button">删除</button>
+    </div>
+
+    <div class="right">
+      <span id="llmPill" class="pill">模型 检查中…</span>
+      <button id="btnTheme" class="btn ghost" type="button" title="切换深浅色">☾ 深色</button>
+    </div>
+  </header>
+
+  <nav class="stepper" id="stepper" aria-label="流程顺序"></nav>
+
+  <div id="compat" class="compat" hidden>
+    当前浏览器内核太旧（缺少 fetch 流式读取 / TextDecoder）。请用
+    <b>Chrome 109</b>、<b>Edge 109</b> 或 <b>Firefox 115 ESR</b> 打开本页 ——
+    它们是 Windows 7 上最后一批支持现代界面的浏览器；IE11 只能显示降级页面。
+  </div>
+
+  <main id="main">
+
+    <!-- ============================ 工作台 ============================ -->
+    <section class="view" id="view-work" hidden>
+      <div class="card">
+        <div class="cardhead">
+          <h2>设计工作台 <small>十阶段</small></h2>
+          <span class="tag">Phase 1 接入编辑与追问</span>
+        </div>
+        <p class="hint">本页在 Phase 0 是<b>只读</b>预览：阶段状态、定稿字数、追问与自检数量都直接读自项目文件。</p>
+        <div class="rawbox">
+          <div class="rlabel">研究设想（原始输入）</div>
+          <pre id="rawDesign" class="raw">（空）</pre>
+        </div>
+        <div id="workStages" class="stagerows"></div>
+      </div>
+    </section>
+
+    <!-- ============================ 统计 ============================ -->
+    <section class="view" id="view-stat" hidden>
+      <div class="card">
+        <div class="cardhead">
+          <h2>统计 <small>九阶段</small></h2>
+          <span class="tag">Phase 2 接入引导式对话</span>
+        </div>
+        <p class="hint">提问 → 回答 → 定稿 → 采纳的四步流程将在 Phase 2 落地；此处先显示每阶段的引导状态与自检进度。</p>
+        <div id="statRows" class="scoperows"></div>
+      </div>
+    </section>
+
+    <!-- =========================== SCI 结构 =========================== -->
+    <section class="view" id="view-shape" hidden>
+      <div class="card">
+        <div class="cardhead">
+          <h2>SCI 结构 <small>七章</small></h2>
+          <span class="tag">Phase 2/3 接入引导式对话</span>
+        </div>
+        <p class="hint">七章的 scope 与自检项已能读取；引导式完善与成稿写作将在后续阶段接入。</p>
+        <div id="shapeRows" class="scoperows"></div>
+      </div>
+    </section>
+
+    <!-- ============================ 总览 ============================ -->
+    <section class="view" id="view-ov">      <div class="grid2">
+        <div class="card conv">
+          <div class="cardhead">
+            <h2>收敛推理 <small>由模型自行判断各章来源与缺口</small></h2>
+            <span id="convState" class="tag">尚未推理</span>
+          </div>
+          <p class="hint">
+            代码里<b>没有任何</b>章节↔阶段的对应表：把项目全部素材原样交给模型，
+            由它在推理模式下自行判断"哪条内容支撑哪一章、还缺什么"。
+          </p>
+          <div class="row">
+            <button id="btnConv" class="btn primary" type="button">开始推理</button>
+            <button id="btnConvStop" class="btn ghost" type="button" hidden>停止</button>
+            <span id="convMeta" class="meta"></span>
+          </div>
+          <div id="convLive" class="live" hidden>
+            <div class="livelabel">实时输出（弱化色为推理过程）</div>
+            <pre id="convText" class="livetext"></pre>
+          </div>
+          <div id="convOverall" class="overall" hidden></div>
+          <div id="convChapters" class="chapters"></div>
+          <div id="convActions" class="actions" hidden></div>
+        </div>
+
+        <div class="card lanes">
+          <div class="cardhead"><h2>三条工作线 <small>事实统计，不做推理</small></h2></div>
+          <div id="laneBox" class="lanebox"></div>
+          <div class="divider"></div>
+          <div class="cardhead"><h2>素材计数</h2></div>
+          <div id="digestBox" class="digest"></div>
+          <div class="divider"></div>
+          <div class="foot" id="projMeta"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardhead">
+          <h2>十阶段进度 <small>工作台</small></h2>
+          <span id="stageCounts" class="tag"></span>
+        </div>
+        <div class="tablewrap">
+          <table class="tbl" id="ovStages">
+            <thead>
+              <tr><th>#</th><th>阶段</th><th>规范条目</th><th>状态</th><th>定稿</th><th>追问</th><th>检查项</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span id="footLeft">—</span>
+    <span id="footRight"></span>
+  </footer>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

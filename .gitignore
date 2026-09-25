@@ -47,4 +47,6 @@ docs/parse/*.txt
 # 测试临时目录与错误输出
 _*test/
 _*test_dir/
+_tmp_web_test/
+_tmp_web_demo/
 *.err
