@@ -51,6 +51,54 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ---
 
+## 系统要求（含 Windows 7 说明）
+
+| 用途 | 最低系统 | 原因 |
+|---|---|---|
+| **图形界面**（`design_studio.py` / `omics_pipeline.py` / 合并版 exe） | **Windows 10 / 11（64 位）** | 界面基于 PySide6 6.x（**Qt 6 不支持 Windows 7**）；构建用的 Python ≥ 3.9 也已放弃 Win7 |
+| **推理 API**（`api_server.py`） | Windows 7 **SP1** 可行 | 无 Qt 依赖；用 **Python 3.8** 构建即可（见下） |
+| **MCP 服务**（`mcp_server.py`） | 取决于 `mcp` 包的 Python 下限 | 一般要求 ≥ 3.10 |
+| macOS | macOS 11+ | PySide6 6.x 要求 |
+
+### Windows 7 上报「计算机中丢失 api-ms-win-core-path-l1-1-0.dll」怎么办
+
+`api-ms-win-core-path-l1-1-0.dll` 是 **Windows 8 起才提供的 API set**，而 **Python 3.9+ 的
+`python3XX.dll` 会直接导入它**（CPython 自 3.9 起官方不再支持 Windows 7）。PyInstaller 会把
+`python311.dll` 一起打进产物，于是 Win7 在**加载阶段**就失败 —— 报错发生在我们的代码运行之前，
+程序内部无法拦截，也无法给出更友好的提示。
+
+本仓库自带工具可以实测这一点：
+
+```bat
+:: 3.11 的运行时 → 会列出 Win8+ 专有 API set（正是你看到的报错）
+python _check_win_target.py D:\python\envs\mar\python311.dll
+
+:: 3.8 的运行时 → 干净，可在 Win7 上运行
+python _check_win_target.py <某个 Python 3.8 环境的>\python38.dll
+```
+
+**单独补一个 `api-ms-win-core-path-l1-1-0.dll` 解决不了问题**：图形界面还卡在 Qt 6
+（Qt 5.15 是最后一个支持 Win7 的版本），而本项目界面基于 PySide6 6.x + PyCt6，无法降到 Qt 5。
+
+### 目标机是 Windows 7 时怎么做
+
+1. **只需要推理 API**（把 Win7 机器当作 OpenAI 兼容服务端，供 Win10 机器或其他客户端调用）：
+   运行 **`编译_Win7_API版.bat`** —— 用 Python 3.8 打包 `api_server.py`，
+   **不含 Qt**，并在 spec 里排除 `PySide6 / shiboken6 / PyCt6 / mcp / docx` 整条链路。
+   目标机需要：Win7 **SP1**(x64) + **KB2533623** + **KB2999226**(UCRT) + **VC++ 2015-2019 运行库**(x64)。
+   构建机需要：Python **3.8**（`py -3.8 -m pip install "pyinstaller==6.10" certifi`；
+   PyInstaller 6.11+ 要求 ≥3.9，故 3.8 上请用 6.10 或 5.13）。
+2. **需要图形界面**：升级到 Windows 10/11；或在一台 Win10 机器上运行主程序，
+   用 `PCLRadiomics.exe api --port 8788` / `mcp` 让 Win7 机器以客户端方式使用。
+3. 任何构建完成后都建议自检一次：
+
+   ```bat
+   python _check_win_target.py dist\PCLRadiomicsAPI\PCLRadiomicsAPI.exe
+   :: ✓ 未发现 Win8+/Win10+ 专有 API set  → 该产物可以在 Win7 上跑
+   ```
+
+---
+
 ## 一、设计工作台（主界面）
 
 ### 它怎么工作
@@ -365,12 +413,19 @@ D:\python\envs\mar\python.exe _test_api_stream.py    :: 流式细化（区分正
 
 ## 五、打包成 exe（一个 exe 承载全部模式）
 
+> **产物系统要求：Windows 10 / 11（64 位）。** 原因与 Windows 7 的处理办法见上面的
+> 「[系统要求](#系统要求含-windows-7-说明)」小节 —— 简言之：Python 3.9+ 与 Qt 6 都不支持 Win7。
+> 若目标机是 Win7 且只需要推理 API，用 `编译_Win7_API版.bat`（Python 3.8 + 无 Qt）。
+
 ```bat
 build_exe.bat            :: 文件夹版（onedir，启动快，适合 MCP 常驻）
 编译单文件版.bat          :: 单文件版（onefile，拷一个文件就能跑）
+编译_Win7_API版.bat       :: Windows 7 专用：仅推理 API（Python 3.8，不含 Qt）
 :: 或手动
 D:\python\envs\mar\python.exe -m PyInstaller --noconfirm --clean pclradiomics.spec
 set PCL_ONEFILE=1 && D:\python\envs\mar\python.exe -m PyInstaller --noconfirm --clean --distpath dist-onefile pclradiomics.spec
+:: Win7 版（需先装 Python 3.8）
+py -3.8 -m PyInstaller --noconfirm --clean pclradiomics_api_win7.spec
 ```
 
 | 形态 | 体积 | 启动 | 适用 |
@@ -573,6 +628,10 @@ D:\python\envs\mar\python.exe _test_project_ops.py
 
 :: 多尺寸四视图截图（可加 --dark）
 D:\python\envs\mar\python.exe _probe_views.py 1120 700
+
+:: 目标系统检查：当前工具链的最低 Windows 要求 / 某个 exe 是否含 Win8+ 专有 API set
+D:\python\envs\mar\python.exe _check_win_target.py
+D:\python\envs\mar\python.exe _check_win_target.py dist\PCLRadiomics\PCLRadiomics.exe
 ```
 
 ## 五、规范依据
