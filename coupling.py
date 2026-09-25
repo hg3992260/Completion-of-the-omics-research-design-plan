@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import re
+
 import scope_core
 import shape_data as shape
 import stat_data as stat
@@ -132,3 +134,125 @@ def digest_stats(project) -> dict:
                            if (shape_store.get(s["key"]) or {}).get("final")),
         "scope_final": with_final,
     }
+
+
+# --------------------------------------------------------------------------- 引用解析
+# 说明：模型在【各章收敛】的"来源"里，会写它引用的是**项目里真实存在的条目**
+# （例如"设计工作台 01–04；统计 s1_question–s4_missing；SCI 结构 title"）。
+# 下面这些函数只做一件事：把这些**引用**解析成可跳转的目标。
+# 代码里依然**没有**"哪一章对应哪一阶段"的对应表 —— 对应关系由模型给出，我们只做解析。
+
+_WORK_CTX = re.compile(r"(?:设计工作台|工作台)\s*(?:的)?\s*(?:阶段)?\s*[·:：]?\s*"
+                       r"([0-9]{1,2}(?:\s*[–—~\-至到]\s*[0-9]{1,2})?"
+                       r"(?:\s*[、,，和]\s*[0-9]{1,2}(?:\s*[–—~\-至到]\s*[0-9]{1,2})?)*)")
+_STAGE_WORD = re.compile(r"第\s*([0-9]{1,2})\s*阶段")
+_STAT_TOKEN = re.compile(r"\bs([0-9]{1,2})(?![0-9])[A-Za-z_]*", re.I)
+_RANGE_SEP = re.compile(r"^[\s–—~\-至到]*$")
+
+
+def _expand(spec: str) -> list:
+    """把 '01–04' / '1、3' 这类写法展开成 [1,2,3,4] / [1,3]。"""
+    out = []
+    for part in re.split(r"[、,，和]", spec or ""):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.match(r"^([0-9]{1,2})\s*[–—~\-至到]\s*([0-9]{1,2})$", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            out += list(range(min(a, b), max(a, b) + 1))
+        elif part.isdigit():
+            out.append(int(part))
+    return out
+
+
+def resolve_refs(text: str, project=None) -> list:
+    """把一段文字里的"引用"解析成可跳转目标（事实解析，不含任何对应关系）。
+
+    识别三类引用：
+      · 十阶段：`设计工作台 01–04`、`工作台 3`、`第 4 阶段`
+      · 统计九阶段：`s3_power`、`s1_question–s4_missing`、`统计 s5`
+      · SCI 七章：章节英文名（Title / Methods…）或章节 key
+    返回 [{"kind": "work|stat|shape", "target": "3"/"s3_power"/"methods", "label": "…"}]。
+    """
+    text = text or ""
+    found = []                                     # (kind, target) 保序去重
+
+    def add(kind, target):
+        if (kind, target) not in found:
+            found.append((kind, target))
+
+    for m in _WORK_CTX.finditer(text):
+        for n in _expand(m.group(1)):
+            if 1 <= n <= len(STAGES):
+                add("work", str(n))
+    for m in _STAGE_WORD.finditer(text):
+        n = int(m.group(1))
+        if 1 <= n <= len(STAGES):
+            add("work", str(n))
+
+    hits = [(m.start(), m.end(), int(m.group(1))) for m in _STAT_TOKEN.finditer(text)]
+    for i, (s0, e0, n0) in enumerate(hits):
+        if i + 1 < len(hits):
+            s1, _e1, n1 = hits[i + 1]
+            if _RANGE_SEP.match(text[e0:s1]) and abs(n1 - n0) > 1:
+                for n in range(min(n0, n1), max(n0, n1) + 1):
+                    add("stat", str(n))
+                continue
+        add("stat", str(n0))
+    by_id = {s["id"]: s for s in stat.STAGES}
+    found = [(k, t) for k, t in found if not (k == "stat") or int(t) in by_id]
+
+    low = text.lower()
+    for sec in shape.SHAPE:
+        eng = " ".join(re.findall(r"[A-Za-z][A-Za-z\-]*", sec.get("title", ""))).strip().lower()
+        if not eng:
+            continue
+        if re.search(r"\b%s\b" % re.escape(eng), low) or sec["key"] in low:
+            add("shape", sec["key"])
+
+    stats = {s["id"]: s for s in stat.STAGES}
+    shapes = {s["key"]: s for s in shape.SHAPE}
+    works = {s["id"]: s for s in STAGES}
+    out = []
+    for kind, target in sorted(found, key=lambda x: ({"work": 0, "stat": 1, "shape": 2}[x[0]],
+                                                     int(x[1]) if x[1].isdigit() else x[1])):
+        if kind == "work" and int(target) in works:
+            s = works[int(target)]
+            out.append({"kind": "work", "target": target,
+                        "label": "工作台 %02d · %s" % (s["id"], s["title"])})
+        elif kind == "stat" and int(target) in stats:
+            s = stats[int(target)]
+            out.append({"kind": "stat", "target": s["key"],
+                        "label": "统计 %02d · %s" % (s["id"], s["title"])})
+        elif kind == "shape" and target in shapes:
+            s = shapes[target]
+            out.append({"kind": "shape", "target": s["key"],
+                        "label": "SCI %02d · %s" % (s["id"], s["title"])})
+    return out
+
+
+def chapter_links(chapter: dict, project=None) -> list:
+    """一章的跳转目标 = 它自己（按章节名匹配 SCI 环节）+ 它在"来源"里引用的条目。"""
+    links = resolve_refs((chapter or {}).get("sources", ""), project)
+    own = resolve_refs((chapter or {}).get("title", ""), project)
+    for link in own:
+        if link["kind"] == "shape" and link not in links:
+            links.insert(0, link)
+    return links
+
+
+def cited_by(project) -> dict:
+    """反查：每个环节/阶段被哪些章引用（用于 scope 页显示"模型认为本环节支撑哪一章"）。
+
+    依据同样是**模型自己写的来源引用**，不是代码里的对应表。
+    """
+    out = {}
+    for ch in ((getattr(project, "convergence", None) or {}).get("chapters") or []):
+        title = ch.get("title") or ""
+        for link in chapter_links(ch, project):
+            key = (link["kind"], link["target"])
+            out.setdefault(key, [])
+            if title and title not in out[key]:
+                out[key].append(title)
+    return out

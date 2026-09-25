@@ -245,7 +245,15 @@ function renderStageDetail() {
     h.push(sec('风险提示', '<div class="box warn">' + esc(s.risks) + '</div>'));
   }
   if (s.checklist && s.checklist.length) {
-    h.push(sec('检查表', ul(s.checklist, 'check')));
+    var cdone = s.checks_done || 0;
+    h.push(sec('检查表（' + cdone + '/' + s.checklist.length + '　点击即可勾选）',
+      '<div class="cklist">' + s.checklist.map(function (c, i) {
+        var on = !!(s.checklist_done && s.checklist_done[String(i)]);
+        return '<div class="ckitem' + (on ? ' on' : '') + '" data-idx="' + i +
+          '" title="点击切换">' +
+          '<span class="box3d">✓</span><span><span class="num">' + (i + 1) + '</span>' +
+          esc(c) + '</span></div>';
+      }).join('') + '</div>'));
   }
   if (s.next) { h.push(sec('下一步', '<div class="box">' + esc(s.next) + '</div>')); }
   if (s.final) {
@@ -253,6 +261,7 @@ function renderStageDetail() {
       '<textarea id="finalBox" class="ta" rows="8">' + esc(s.final) + '</textarea>', 'ok'));
   }
   $('wDetail').innerHTML = h.join('');
+  bindWorkChecks();
 
   var b = [];
   function btn(act, text, cls) {
@@ -270,8 +279,32 @@ function renderStageDetail() {
   }
   if (s.draft) { b.push(btn('accept', '采纳为定稿', 'primary')); }
   if (s.final) { b.push(btn('saveFinal', '保存定稿修改')); }
+  if (s.checklist && s.checklist.length) {
+    b.push(btn('allChecks', '检查表全选'));
+    b.push(btn('noneChecks', '清空检查表'));
+  }
   acts.innerHTML = b.join('');
   setBusy(BUSY);
+}
+
+function bindWorkChecks() {
+  Array.prototype.forEach.call(document.querySelectorAll('#wDetail .ckitem'), function (el) {
+    el.addEventListener('click', function () {
+      if (BUSY) { return; }
+      var idx = parseInt(el.getAttribute('data-idx'), 10);
+      var on = !el.classList.contains('on');
+      el.classList.toggle('on', on);
+      post(API + '/stage/save', {
+        project: STATE.current, sid: WORK_SID, set_check: [[idx, on]]
+      }).then(function (j) {
+        applyState(j.state);
+        toast(on ? '已勾选检查项 ' + (idx + 1) : '已取消检查项 ' + (idx + 1));
+      }).catch(function (e) {
+        el.classList.toggle('on', !on);
+        toast('保存勾选失败：' + e.message);
+      });
+    });
+  });
 }
 
 function readAnswers() {
@@ -502,6 +535,16 @@ function scopeGuideHtml(page, d) {
       '<textarea id="' + page + 'FinalBox" class="ta" rows="10">' + esc(node.final) +
       '</textarea>', 'ok'));
   }
+  if ((d.cited_by || []).length) {
+    h.push(sec('模型认为本环节支撑的章节（点击回到总览）',
+      '<div class="jump">' + d.cited_by.map(function (c) {
+        return '<button class="chip" type="button" data-goto-chapter="' + esc(c.title) +
+          '">↗ ' + esc(c.title) +
+          (typeof c.readiness === 'number' ? '　就绪度 ' + c.readiness : '') + '</button>';
+      }).join('') + '</div>' +
+      (d.cited_by[0].missing
+        ? '<div class="box warn">缺失：' + esc(d.cited_by[0].missing) + '</div>' : '')));
+  }
   if (node.next) { h.push(sec('下一步', '<div class="box">' + esc(node.next) + '</div>')); }
   return h.join('');
 }
@@ -603,6 +646,10 @@ function scopeAction(page, act) {
 
 function bindScope(page) {
   var cfg = SCOPES[page];
+  $(cfg.bodyId).addEventListener('click', function (ev) {
+    var b = ev.target.closest ? ev.target.closest('button[data-goto-chapter]') : null;
+    if (b) { gotoChapter(b.getAttribute('data-goto-chapter')); }
+  });
   $(cfg.modeCId).addEventListener('click', function () {
     if (BUSY) { return; }
     cfg.mode = 'content';
@@ -660,7 +707,8 @@ function renderStageTable(ov) {
       '<td class="center">' + (s.is_final ? '✅ ' + s.body_len + ' 字'
                                           : (s.body_len ? '◐ 草稿' : '—')) + '</td>' +
       '<td class="center">' + ((s.questions || []).length || '—') + '</td>' +
-      '<td class="center">' + ((s.checklist || []).length || '—') + '</td></tr>';
+      '<td class="center">' + ((s.checklist || []).length
+        ? (s.checks_done || 0) + '/' + s.checklist.length : '—') + '</td></tr>';
   }).join('');
   var c = ov.stage_counts || {};
   $('stageCounts').textContent = '已定稿 ' + (c.done || 0) + ' · 已追问 ' + (c.asked || 0) +
@@ -691,12 +739,21 @@ function renderConvergence(conv) {
       if (!v) { return ''; }
       return '<dt>' + k + '</dt><dd class="' + (cls || '') + '">' + esc(v) + '</dd>';
     }
-    return '<div class="chap"><div class="ch"><b>' + esc(c.title) + '</b>' +
+    return '<div class="chap" data-chapter="' + esc(c.title) + '">' +
+      '<div class="ch"><b>' + esc(c.title) + '</b>' +
       (rs === null ? '' : bar(rs, 100, bcls) + '<span class="pct">' + rs + '%</span>') +
       '</div><dl>' +
       dl('来源', c.sources) + dl('已有', c.have) +
       dl('缺失', c.missing, c.missing && c.missing !== '无' ? 'miss' : '') +
-      dl('理由', c.reason, 'why') + '</dl></div>';
+      dl('理由', c.reason, 'why') + '</dl>' +
+      ((c.links || []).length
+        ? '<div class="jump">' + (c.links || []).map(function (l) {
+            return '<button class="chip" type="button" data-kind="' + esc(l.kind) +
+              '" data-target="' + esc(l.target) + '" title="跳到这一条">↗ ' +
+              esc(l.label) + '</button>';
+          }).join('') + '</div>'
+        : '') +
+      '</div>';
   }).join('');
 
   $('convActions').hidden = !actions.length;
@@ -704,6 +761,75 @@ function renderConvergence(conv) {
     ? '<div class="al">下一批动作（按优先级）</div><ol>' +
       actions.map(function (a) { return '<li>' + esc(a) + '</li>'; }).join('') + '</ol>'
     : '';
+}
+
+/* ------------------------------------------------- 收敛结论 ⇄ 页面/环节互跳 */
+/* 跳转目标全部来自模型自己写的"来源"引用（后端 coupling.resolve_refs 解析），
+   代码里没有"哪一章对应哪一阶段"的对应表。 */
+function flash(containerId, attr, val) {
+  var el = document.querySelector('#' + containerId + ' [' + attr + '="' + val + '"]');
+  if (!el) { return; }
+  el.classList.add('flash');
+  setTimeout(function () { el.classList.remove('flash'); }, 1800);
+}
+
+function jumpTo(kind, target) {
+  if (BUSY) { toast('上一步还在进行中'); return; }
+  if (kind === 'work') {
+    WORK_SID = parseInt(target, 10) || 1;
+    try { localStorage.setItem('pcl-sid', String(WORK_SID)); } catch (e) { /* ignore */ }
+    QQ.set('view', 'work');
+    QQ.set('sid', String(WORK_SID));
+    QQ.delete('key');
+    history.replaceState(null, '', '?' + QQ.toString());
+    showView('work');
+    if (STATE && STATE.overview) {
+      renderWork(STATE.overview);
+      flash('stageRail', 'data-sid', WORK_SID);
+    }
+  } else if (kind === 'stat' || kind === 'shape') {
+    var cfg = SCOPES[kind];
+    cfg.cur = target;
+    cfg.data = null;
+    cfg.mode = 'guide';                     // 从缺口跳过去，多半是要补内容 → 直接进引导
+    QQ.set('view', kind);
+    QQ.set('key', target);
+    QQ.set('mode', 'guide');
+    history.replaceState(null, '', '?' + QQ.toString());
+    showView(kind);
+    if (STATE && STATE.overview) {
+      renderScopeView(kind);
+      flash(cfg.railId, 'data-key', target);
+    }
+  }
+  window.scrollTo(0, 0);
+  toast('已跳到 ' + (kind === 'work' ? '工作台' : kind === 'stat' ? '统计' : 'SCI 结构'));
+}
+
+function gotoChapter(title) {
+  QQ.set('view', 'ov');
+  history.replaceState(null, '', '?' + QQ.toString());
+  showView('ov');
+  var chapters = ((STATE || {}).convergence || {}).chapters || [];
+  var idx = -1;
+  for (var i = 0; i < chapters.length; i++) {
+    if (chapters[i].title === title) { idx = i; break; }
+  }
+  var cards = document.querySelectorAll('#convChapters .chap');
+  if (idx >= 0 && cards[idx]) {
+    cards[idx].scrollIntoView({ block: 'center' });
+    cards[idx].classList.add('flash');
+    setTimeout(function () { cards[idx].classList.remove('flash'); }, 1800);
+  }
+}
+
+function bindConvergenceLinks() {
+  $('convChapters').addEventListener('click', function (ev) {
+    var b = ev.target.closest ? ev.target.closest('button[data-kind]') : null;
+    if (b) {
+      jumpTo(b.getAttribute('data-kind'), b.getAttribute('data-target'));
+    }
+  });
 }
 
 /* ------------------------------------------------------------ 数据加载 */
@@ -1012,6 +1138,13 @@ function bindWork() {
              answers: readAnswers() })
         .then(function (j) { applyState(j.state); toast('已保存定稿修改'); })
         .catch(function (e) { toast('保存失败：' + e.message); });
+    } else if (act === 'allChecks' || act === 'noneChecks') {
+      post(API + '/stage/save',
+           { project: proj, sid: WORK_SID, set_all: (act === 'allChecks') })
+        .then(function (j) {
+          applyState(j.state);
+          toast(act === 'allChecks' ? '已勾选全部检查项' : '已清空检查表');
+        }).catch(function (e) { toast('操作失败：' + e.message); });
     }
   });
 
@@ -1078,6 +1211,7 @@ function boot() {
   bindScope('stat');
   bindScope('shape');
   bindConvergence();
+  bindConvergenceLinks();
   var k0 = QQ.get('key');                          // 深链接：?view=stat&key=s3_power
   if (k0) {
     SCOPES.stat.cur = k0;

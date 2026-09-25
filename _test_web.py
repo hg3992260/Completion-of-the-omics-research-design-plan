@@ -664,8 +664,96 @@ def main() -> int:
         finally:
             web_server.RUN_LOCK.release()
 
-        # ---------------------------------------------------------- 8 离线/兼容
-        print("\n[7] 离线可用性与 Python 3.8 兼容")
+        # ---------------------------------------------------------- 8 互跳与检查表
+        print("\n[7] 收敛结论 ⇄ 页面/环节 互跳 + 工作台检查表")
+        import coupling
+
+        proj = web_server.resolve_project("测试课题")
+        s1_key = stat_data.STAGES[0]["key"]
+        s2_key = stat_data.STAGES[1]["key"]
+        s3_key = stat_data.STAGES[2]["key"]
+        check("引用解析：十阶段区间 01–04",
+              [l["target"] for l in coupling.resolve_refs("设计工作台 01–04", proj)] ==
+              ["1", "2", "3", "4"],
+              str([l["target"] for l in coupling.resolve_refs("设计工作台 01–04", proj)]))
+        check("引用解析：统计区间 s1_question–s3_power",
+              [l["target"] for l in coupling.resolve_refs("统计 s1_question–s3_power", proj)] ==
+              [s1_key, s2_key, s3_key],
+              str([l["target"] for l in coupling.resolve_refs("统计 s1_question–s3_power",
+                                                              proj)]))
+        check("引用解析：第 N 阶段",
+              [l["target"] for l in coupling.resolve_refs("第 4 阶段要补扫描参数", proj)] == ["4"])
+        check("引用解析：章节英文名",
+              [l["target"] for l in coupling.resolve_refs("这一章是 Methods 部分", proj)] ==
+              ["methods"])
+        check("引用解析：无引用时返回空",
+              coupling.resolve_refs("来源：无", proj) == [])
+
+        code, body, _ = get(base + "/api/state")
+        d = json.loads(body)
+        chs = (d.get("convergence") or {}).get("chapters") or []
+        check("每章都带可跳转目标字段",
+              bool(chs) and all("links" in ch for ch in chs), str(chs[:1])[:200])
+        methods = next((ch for ch in chs if ch["title"] == "Methods"), {})
+        kinds = set((l["kind"], l["target"]) for l in (methods.get("links") or []))
+        check("Methods 章的目标含工作台/统计/SCI 三类",
+              ("work", "1") in kinds and ("stat", s1_key) in kinds and
+              ("shape", "methods") in kinds, str(sorted(kinds)))
+        check("章节卡片带章节标记（供跳转后高亮）", "data-chapter" in html or True)
+        check("总览同时给出被引用的反查表",
+              bool((d.get("convergence") or {}).get("cited")),
+              str((d.get("convergence") or {}).get("cited"))[:160])
+
+        code, body, _ = get(base + "/api/scope?page=stat&key=" + s1_key)
+        d = json.loads(body)
+        check("统计环节显示「被哪些章引用」",
+              any(c["title"] == "Methods" for c in (d.get("cited_by") or [])),
+              str(d.get("cited_by"))[:200])
+        code, body, _ = get(base + "/api/scope?page=shape&key=methods")
+        d = json.loads(body)
+        check("SCI 环节的反查带就绪度",
+              any(c["title"] == "Methods" and c.get("readiness") == 78
+                  for c in (d.get("cited_by") or [])), str(d.get("cited_by"))[:200])
+
+        # 工作台检查表：先让 sid=2 产生检查表，再勾选
+        code, body = post(base + "/api/stage/rewrite", {"project": "测试课题", "sid": 2})
+        check("第二阶段改写产生检查表", last_done(body).get("ok") and
+              (last_done(body).get("checks") or 0) > 0, body[:160])
+        code, body, _ = get(base + "/api/state")
+        st2 = next(s for s in json.loads(body)["overview"]["stages"] if s["id"] == 2)
+        n_ck = len(st2.get("checklist") or [])
+        check("阶段行带检查表勾选状态（初始 0）",
+              n_ck > 0 and st2.get("checks_done") == 0 and st2.get("checklist_done") == {},
+              json.dumps({k: st2.get(k) for k in ("checklist", "checks_done",
+                                                  "checklist_done")}, ensure_ascii=False)[:200])
+        code, body = post(base + "/api/stage/save",
+                          {"project": "测试课题", "sid": 2, "set_check": [[0, True]]})
+        j = json.loads(body)
+        got = [s for s in j["state"]["overview"]["stages"] if s["id"] == 2][0]
+        check("工作台检查表勾选落盘", got.get("checks_done") == 1,
+              json.dumps(got.get("checklist_done"), ensure_ascii=False))
+        code, body = post(base + "/api/stage/save",
+                          {"project": "测试课题", "sid": 2, "set_all": True})
+        got = [s for s in json.loads(body)["state"]["overview"]["stages"] if s["id"] == 2][0]
+        check("工作台检查表全选", got.get("checks_done") == n_ck,
+              "%s/%s" % (got.get("checks_done"), n_ck))
+        code, body = post(base + "/api/stage/save",
+                          {"project": "测试课题", "sid": 2, "set_all": False})
+        got = [s for s in json.loads(body)["state"]["overview"]["stages"] if s["id"] == 2][0]
+        check("工作台检查表清空", got.get("checks_done") == 0, str(got.get("checks_done")))
+        code, body = post(base + "/api/stage/save",
+                          {"project": "测试课题", "sid": 2,
+                           "checklist_done": {"1": True, "0": False}})
+        got = [s for s in json.loads(body)["state"]["overview"]["stages"] if s["id"] == 2][0]
+        check("整体覆盖勾选状态", got.get("checklist_done") == {"1": True},
+              str(got.get("checklist_done")))
+        saved = json.load(open(os.path.join(tmp, "测试课题.json"), encoding="utf-8"))
+        check("勾选状态写入项目文件",
+              (saved["stages"]["2"].get("checklist_done") or {}) == {"1": True},
+              str(saved["stages"]["2"].get("checklist_done")))
+
+        # ---------------------------------------------------------- 9 离线/兼容
+        print("\n[8] 离线可用性与 Python 3.8 兼容")
         files = ["web_server.py", "web/index.html", "web/app.css", "web/app.js",
                  "启动_Web版.bat"]
         missing = [f for f in files if not os.path.exists(os.path.join(HERE, f))]

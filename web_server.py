@@ -206,6 +206,14 @@ def scope_payload(page: str, key: str, project) -> dict:
                  "updated": node.get("updated", "")},
     }
     out.update(extra)
+    # 反查：模型认为本环节支撑哪些章（同样来自它自己写的来源引用）
+    conv = getattr(project, "convergence", None) or {}
+    by_title = {ch.get("title"): ch for ch in (conv.get("chapters") or [])}
+    out["cited_by"] = [{"title": t,
+                        "readiness": (by_title.get(t) or {}).get("readiness"),
+                        "missing": (by_title.get(t) or {}).get("missing", ""),
+                        "reason": (by_title.get(t) or {}).get("reason", "")}
+                       for t in coupling.cited_by(project).get((page, sec["key"]), [])]
     return out
 
 
@@ -234,6 +242,8 @@ def _stage_rows(project) -> list:
             "risks": st.get("risks", ""),
             "next": st.get("next", ""),
             "checklist": list(st.get("checklist") or []),
+            "checklist_done": dict(st.get("checklist_done") or {}),
+            "checks_done": sum(1 for v in (st.get("checklist_done") or {}).values() if v),
             "model": st.get("model", ""),
             "updated": st.get("updated", ""),
             "body_len": len(body),
@@ -261,6 +271,13 @@ def state_payload(sel: str, project=None) -> dict:
     }
     if project is None:
         return out
+    # 收敛结果：给每一章补上"可跳转目标"（由模型自己写的来源引用解析而来，没有对应表）
+    conv = dict(getattr(project, "convergence", None) or {})
+    if conv.get("chapters"):
+        conv["chapters"] = [dict(ch, links=coupling.chapter_links(ch, project))
+                            for ch in conv["chapters"]]
+        conv["cited"] = {"%s:%s" % k: v for k, v in coupling.cited_by(project).items()}
+    out["convergence"] = conv
     stat_store = getattr(project, "stat", None) or {}
     shape_store = getattr(project, "shape", None) or {}
     s_done, s_doing, s_ticks = scope_core.overall(stat_store, stat_data.STAGES)
@@ -286,7 +303,7 @@ def state_payload(sel: str, project=None) -> dict:
         "transcript_len": len(getattr(project, "transcript", None) or []),
         "final_doc": getattr(project, "final_doc", "") or "",
     }
-    out["convergence"] = getattr(project, "convergence", None) or {}
+    out["convergence"] = conv
     return out
 
 
@@ -758,6 +775,23 @@ class Handler(BaseHTTPRequestHandler):
             st["answers"] = [str(a or "").strip() for a in body["answers"]]
         if isinstance(body.get("checklist"), list):
             st["checklist"] = [str(c) for c in body["checklist"]]
+        if isinstance(body.get("checklist_done"), dict):        # 整体覆盖 {"0": true, ...}
+            st["checklist_done"] = {str(k): True
+                                    for k, v in body["checklist_done"].items() if v}
+        if isinstance(body.get("set_check"), list):             # 工作台检查表勾选 [[序号, 是否勾选]]
+            done = st.setdefault("checklist_done", {})
+            for pair in body["set_check"]:
+                try:
+                    i, on = str(int(pair[0])), bool(pair[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if on:
+                    done[i] = True
+                else:
+                    done.pop(i, None)
+        if body.get("set_all") in (True, False):                # 检查表全选 / 清空
+            st["checklist_done"] = ({str(i): True for i in range(len(st.get("checklist") or []))}
+                                    if body["set_all"] else {})
         if body.get("status") in ("todo", "asked", "drafted", "done"):
             st["status"] = body["status"]
         if body.get("accept"):                  # 采纳：把定稿框内容当定稿收录

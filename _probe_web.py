@@ -242,8 +242,45 @@ AUTOTEST_JS = r"""
           if (ex < 10) { return fail('待补数据清单没有渲染'); }
           ok('len=' + box.textContent.length + ' extra=' + ex);
         });
+      } else if (mode === 'jumpto') {          // 收敛结论 → 点章节里的跳转按钮
+        var chip = document.querySelector('#convChapters button[data-kind="stat"]') ||
+                   document.querySelector('#convChapters button[data-kind]');
+        if (!chip) { return fail('收敛章节里没有跳转按钮'); }
+        var kind = chip.getAttribute('data-kind');
+        var target = chip.getAttribute('data-target');
+        chip.click();
+        waitFor(function () {
+          return !document.getElementById('view-' + kind).hidden;
+        }, function () {
+          var rail = document.getElementById(kind === 'work' ? 'stageRail' : kind + 'Rail');
+          var sel = rail ? rail.querySelector('.railitem.sel') : null;
+          var got = sel ? (kind === 'work' ? sel.getAttribute('data-sid')
+                                           : sel.getAttribute('data-key')) : null;
+          if (got !== target) {
+            return fail('跳转后选中的不是目标：' + kind + ':' + target + ' 实际=' + got);
+          }
+          ok('kind=' + kind + ' target=' + target);
+        });
+      } else if (mode === 'worktick') {        // 工作台检查表：点一下就落盘
+        var witems = document.querySelectorAll('#wDetail .ckitem');
+        if (!witems.length) { return fail('工作台没有渲染检查表'); }
+        witems[0].click();
+        var wn = 0;
+        (function pollW() {
+          fetch('/api/state').then(function (r) { return r.json(); }).then(function (d) {
+            var st = ((d.overview || {}).stages || []).filter(function (x) {
+              return String(x.id) === sid;
+            })[0] || {};
+            if ((st.checks_done || 0) >= 1) {
+              return ok('sid=' + sid + ' checks=' + st.checks_done + '/' +
+                        (st.checklist || []).length);
+            }
+            if (wn++ > 60) { return fail('服务端没有记录检查表勾选'); }
+            setTimeout(pollW, 50);
+          });
+        })();
       } else if (mode === 'scopeask' || mode === 'scoperewrite' || mode === 'scopeaccept'
-                 || mode === 'scopetick') {
+                 || mode === 'scopetick' || mode === 'chapback') {
         // ---- scope 页（统计 / SCI）：page 由 URL 给出 ----
         var page = new URLSearchParams(location.search).get('page') || 'stat';
         var key = new URLSearchParams(location.search).get('key') || '';
@@ -322,6 +359,19 @@ AUTOTEST_JS = r"""
                 setTimeout(poll, 50);
               });
           })();
+        } else if (mode === 'chapback') {        // scope 环节 → 点"支撑的章节"回到总览
+          var chip2 = document.querySelector('#' + page + 'Body button[data-goto-chapter]');
+          if (!chip2) { return fail('scope 页没有渲染"模型认为本环节支撑"按钮'); }
+          var chap = chip2.getAttribute('data-goto-chapter');
+          chip2.click();
+          waitFor(function () { return !document.getElementById('view-ov').hidden; },
+            function () {
+              var card = document.querySelector(
+                '#convChapters .chap[data-chapter="' + chap + '"]');
+              if (!card) { return fail('总览里没有这一章：' + chap); }
+              ok('chapter=' + chap + ' cards=' +
+                 document.querySelectorAll('#convChapters .chap').length);
+            });
         }
       } else {
         fail('unknown mode');
@@ -384,6 +434,10 @@ AUTOTEST_CASES = [
      "自检勾选：点条目 → 落盘并刷新进度"),
     ("shapeask", "view=shape&key=methods&autotest=scopeask&page=shape",
      "SCI 追问链路可用（同一套模板）"),
+    ("jumpto", "view=ov&autotest=jumpto", "收敛结论 → 点章节里的跳转按钮落到目标环节"),
+    ("worktick", "view=work&sid=3&autotest=worktick", "工作台检查表：点一下就落盘"),
+    ("chapback", "view=stat&mode=guide&key=" + S1 + "&autotest=chapback&page=stat",
+     "scope 环节 → 点「支撑的章节」回到总览并高亮"),
 ]
 
 
@@ -535,7 +589,23 @@ def dom_checks(chrome, base):
     n_ck2 = len(re.findall(r'class="ckitem', part(d7, "shapeBody", "shapeLive")))
     ck("SCI「引导完善」渲染出自检清单",
        n_ck2 == len(shape_data.SHAPE[3]["checks"]), "条目=%s" % n_ck2)
-    return bad, 30
+
+    # 互跳：收敛章节里的跳转按钮 / 工作台检查表 / scope 页的回跳
+    chaps = part(dom, "convChapters", "convActions")
+    n_chip = len(re.findall(r'class="chip"[^>]*data-kind="(\w+)"', chaps))
+    kinds = set(re.findall(r'class="chip"[^>]*data-kind="(\w+)"', chaps))
+    ck("总览的章节卡片渲染出跳转按钮", n_chip >= 3, "按钮=%s" % n_chip)
+    ck("跳转目标覆盖工作台/统计/SCI 三类",
+       {"work", "stat", "shape"} <= kinds, str(sorted(kinds)))
+    work_dom = part(dom3, "wDetail", "wLive")
+    ck("工作台渲染出可勾选的检查表",
+       len(re.findall(r'class="ckitem', work_dom)) >= 2,
+       "条目=%s" % len(re.findall(r'class="ckitem', work_dom)))
+    d9 = dump_dom(chrome, base + "?view=stat&mode=guide&key=" + S1)
+    ck("scope 环节渲染出「模型认为本环节支撑」按钮",
+       'data-goto-chapter=' in part(d9, "statBody", "statLive"),
+       part(d9, "statBody", "statLive")[:200])
+    return bad, 35
 
 
 def main() -> int:

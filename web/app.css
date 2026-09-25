@@ -594,3 +594,28 @@ code { font: 12px Consolas, "Courier New", monospace; padding: 1px 5px; border-r
 .ckitem.sug .num { color: var(--accent); }
 
 .empty { padding: 12px; font-size: 12.5px; color: var(--ink-mute); }
+
+/* ------------------------------------------- 收敛结论 ⇄ 页面/环节 的跳转 */
+.jump { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip {
+  font: inherit; font-size: 11.5px; cursor: pointer;
+  padding: 4px 10px; border-radius: 999px;
+  color: var(--ink-dim);
+  background: linear-gradient(180deg, var(--panel-hi), var(--panel-lo));
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--edge), 0 1px 3px rgba(0,0,0,.22);
+  transition: transform .06s ease, filter .12s ease, color .12s ease;
+}
+.chip:hover { filter: brightness(1.1); color: var(--accent); }
+.chip:active { transform: translateY(1px); box-shadow: inset 0 2px 4px rgba(0,0,0,.35); }
+.chip:disabled { opacity: .5; cursor: default; }
+
+@keyframes pclflash {
+  0% { box-shadow: 0 0 0 0 rgba(79,157,255,.0); }
+  25% { box-shadow: 0 0 0 3px rgba(79,157,255,.55); }
+  100% { box-shadow: 0 0 0 0 rgba(79,157,255,0); }
+}
+.chap.flash, .railitem.flash {
+  animation: pclflash 1.6s ease-out 1;
+  border-color: var(--accent-lo);
+}

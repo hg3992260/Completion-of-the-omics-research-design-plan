@@ -153,7 +153,8 @@ def stage_by_id(sid: int) -> dict:
 
 def blank_stage_state() -> dict:
     return {"status": "todo", "assessment": "", "questions": [], "answers": [],
-            "draft": "", "final": "", "risks": "", "checklist": [], "updated": ""}
+            "draft": "", "final": "", "risks": "", "checklist": [], "checklist_done": {},
+            "updated": ""}
 
 
 def q_text(q) -> str:

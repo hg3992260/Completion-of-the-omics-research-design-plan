@@ -225,6 +225,13 @@ def main() -> int:
                 print("\n[5] 浏览器渲染：跳过（没找到 Chrome/Edge）")
     finally:
         if proc.poll() is None:
+            # 单文件版是「引导进程 + 子进程」结构：只 terminate 父进程会留下一只继续占着
+            # exe 文件与端口（下一次打包就会 PermissionError），所以整棵树一起收掉。
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=20)
+            except Exception:                                        # noqa: BLE001
+                pass
             proc.terminate()
             try:
                 proc.wait(timeout=10)
