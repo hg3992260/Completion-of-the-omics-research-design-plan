@@ -363,7 +363,8 @@ def manuscript_review(path: str, layers: str = "omics,stat,shape",
                       skip_llm: bool = False, max_batches: int = 0,
                       autonomy: str = "revise", merge_into: str = "",
                       reply_mode: str = "reply", per_parent: int = 4,
-                      incremental: bool = False) -> str:
+                      incremental: bool = False,
+                      reuse_current: bool = True) -> str:
     """导入手稿（PDF / Word）→ 三层架构对照找缺陷 → **自主把批注写进 Word** → 出报告。
 
     这是「一条命令跑完整审阅」的入口：跑完即得到带批注（及可选修订）的 Word，
@@ -383,6 +384,10 @@ def manuscript_review(path: str, layers: str = "omics,stat,shape",
         reply_mode: reply（默认，线程回复）/ standalone（只做独立批注）
         per_parent: 一条审稿意见最多收几条回复
         incremental: True 时只把本次新报出的发现写到已有修订稿（默认每次完整重写）
+        reuse_current: True（默认）时，若本次 path 与上一次审阅**是同一份手稿**，
+            就在同一个项目上继续，沿用它已设定的审稿批注版与落盘路径，
+            并跳过重复解析。稿件不同则自动不复用，避免两份手稿的结论混在一起。
+        incremental: True 时只把本次新报出的发现写到已有修订稿（默认每次完整重写）
     """
     if _MR["busy"]:
         return json.dumps({"ok": False, "error": "已有审阅任务在进行中"}, ensure_ascii=False)
@@ -392,10 +397,17 @@ def manuscript_review(path: str, layers: str = "omics,stat,shape",
         eng = _mr_engine()
         lay = [x.strip() for x in (layers or "").split(",") if x.strip()] or None
         steps = []
+        # reuse_current：长驻会话里对**同一份稿子**再跑时，复用已导入的项目，
+        # 从而沿用它已设定的审稿批注版与上一次的落盘路径，不必重新解析。
+        # 稿件不同则不复用（避免把两份手稿的结论混在一个项目里）。
+        prev = _MR.get("project") if reuse_current else None
+        if prev is not None and os.path.abspath(getattr(prev, "source_path", "") or "x") \
+                != os.path.abspath(path):
+            prev = None
         ok, msg, proj = eng.run_all(
             path, layers=lay, skip_llm=skip_llm, max_batches=max_batches,
             autonomy=autonomy, merge_into=merge_into, reply_mode=reply_mode,
-            per_parent=per_parent, fresh=not incremental,
+            per_parent=per_parent, fresh=not incremental, project=prev,
             on_step=lambda s, m: steps.append({"step": s, "msg": m}))
         _MR["project"] = proj
         ap = proj.applied or {}
@@ -404,6 +416,7 @@ def manuscript_review(path: str, layers: str = "omics,stat,shape",
             "steps": steps,
             "project": proj.name, "project_path": proj.path(),
             "autonomy": autonomy,
+            "reused_project": prev is not None,
             "converted": proj.converted, "docx_path": proj.docx_path,
             "outline": proj.outline,
             "signal_summary": proj.signal_summary,

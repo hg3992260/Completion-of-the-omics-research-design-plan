@@ -1117,12 +1117,15 @@ class ManuscriptWorker(QtCore.QThread):
             if act == "all":
                 # 自主落盘：导入 → 核验 → 审阅 → 自动写 Word 批注 → 报告
                 # design=当前工作台课题：自动登记为该课题的手稿附件，并把课题背景带入审阅
+                # project=当前审阅项目：在**同一份项目上继续**，从而沿用已导入的 Word、
+                #   已选定的「审稿批注版」与上一次的落盘路径（不再新建空白项目）
                 ok, msg, proj = eng.run_all(
                     self.path, layers=self.layers, skip_llm=self.skip_llm,
                     autonomy=self.autonomy,
                     merge_into=getattr(self.win, "mr_merge_into", "") or "",
                     reply_mode=getattr(self.win, "mr_reply_mode", "reply"),
                     fresh=True, design=getattr(self.win, "project", None),
+                    project=getattr(self.win, "mr_project", None),
                     on_step=lambda s, m: self.step.emit(s, m))
             elif act == "import":
                 ok, msg, proj = eng.ingest(self.path, proj,
@@ -1576,16 +1579,37 @@ class ManuscriptReviewPage:
         if act in ("signals", "review", "report", "apply") and self.proj is None:
             self._log("请先点「① 导入手稿（PDF / Word）」。", "warn")
             return
-        if act == "all" and self.proj is None and not path:
-            # 一键流程自带导入：这里直接让用户选文件，选完就走完整流程
-            self._log("一键审阅：请选择要审阅的手稿（选完会自动跑完整流程）。", "accent")
-            picked, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self.win, "选择要审阅的手稿（PDF 或 Word）", "",
-                "手稿文件 (*.pdf *.docx);;PDF (*.pdf);;Word (*.docx);;所有文件 (*)")
-            if not picked:
-                self._log("已取消，未选择手稿。", "muted")
-                return
-            path = picked
+        if act == "all" and not path:
+            # 一键审阅要**复用当前项目已导入的那份手稿** —— 而不是再问一次文件。
+            # 早先这里只看 self.proj 是否为 None：已经导入过 Word 的项目再点一键审阅，
+            # 仍会弹出文件选择框，用户会以为"导入的稿子没被用上"。
+            cur = self.proj
+            src = getattr(cur, "source_path", "") if cur is not None else ""
+            if src and os.path.exists(src):
+                path = src
+                self._log(f"一键审阅：复用当前项目已导入的手稿"
+                          f"「{cur.name}」→ {os.path.basename(src)}", "accent")
+            elif src:
+                # 登记过但文件被移走/改名：说明清楚，再让用户重新指定
+                self._log(f"已导入的手稿文件不在了：{src}", "warn")
+                self._log("请重新选择该稿子的位置（选完会自动跑完整流程）。", "muted")
+                picked, _ = QtWidgets.QFileDialog.getOpenFileName(
+                    self.win, "手稿文件已移动，请重新指定", os.path.dirname(src) or "",
+                    "手稿文件 (*.pdf *.docx);;PDF (*.pdf);;Word (*.docx);;所有文件 (*)")
+                if not picked:
+                    self._log("已取消，未选择手稿。", "muted")
+                    return
+                path = picked
+            else:
+                # 还没导入过：让用户选文件，选完走完整流程
+                self._log("一键审阅：请选择要审阅的手稿（选完会自动跑完整流程）。", "accent")
+                picked, _ = QtWidgets.QFileDialog.getOpenFileName(
+                    self.win, "选择要审阅的手稿（PDF 或 Word）", "",
+                    "手稿文件 (*.pdf *.docx);;PDF (*.pdf);;Word (*.docx);;所有文件 (*)")
+                if not picked:
+                    self._log("已取消，未选择手稿。", "muted")
+                    return
+                path = picked
         self._busy(True, _MR_ACT_LABEL.get(act, "审阅进行中"))
         self.mr_transcript.add_rule()
         hdr = f"手稿审阅 · {act}"

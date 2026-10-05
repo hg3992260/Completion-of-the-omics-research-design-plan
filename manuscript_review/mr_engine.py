@@ -491,7 +491,8 @@ class RevEngine:
                 max_batches: int = 0, skip_llm: bool = False,
                 autonomy: str = "auto", merge_into: str = "",
                 reply_mode: str = "reply", per_parent: int = 4,
-                fresh: bool = True, design=None, on_step=None
+                fresh: bool = True, design=None, project: ReviewProject | None = None,
+                on_step=None
                 ) -> tuple[bool, str, ReviewProject]:
         """导入 → 核验 → 语义审阅 → 自主落 Word 批注 → 报告。
 
@@ -506,6 +507,10 @@ class RevEngine:
                重新把全部发现写进 Word（重跑同一稿件时用它，结果可完全复现）。
                False —— **增量追加**：只把本次新报出的发现写到已有修订稿上，
                适合"先审确定性核验、再补一轮语义审阅"的分步用法。
+        project: 当前已有的审阅项目。给了它就在**同一份项目上继续**，
+               从而沿用该项目已设定的：审稿批注版（annotated_path）、
+               上一次的修订稿/报告路径、课题关联、落盘模式等。
+               早先这里无条件新建空白项目，导致「一键审阅」与用户刚导入的项目脱节。
         on_step(step, msg) 用于界面进度。
         """
 
@@ -513,10 +518,22 @@ class RevEngine:
             if on_step:
                 on_step(name, msg)
 
-        ok, msg, p = self.ingest(path, design=design)
-        step("ingest", msg)
-        if not ok:
-            return False, msg, p
+        # 复用已有项目时跳过重复解析：同一份稿子已经解析过，没必要再读一遍
+        # （也避免 outline/signals 被无谓重置）
+        reusable = (project is not None and project.manuscript
+                    and project.source_path
+                    and os.path.abspath(project.source_path) == os.path.abspath(path))
+        if reusable:
+            p = project
+            p.add_log("ingest", f"复用已导入的手稿「{p.name}」"
+                                f"（{os.path.basename(path)}）")
+            step("ingest", f"复用当前项目已导入的手稿：{p.name}"
+                           f"（{len((p.manuscript or {}).get('body') or [])} 段，无需重新解析）")
+        else:
+            ok, msg, p = self.ingest(path, design=design)
+            step("ingest", msg)
+            if not ok:
+                return False, msg, p
         if fresh:
             # 新审阅：重置落盘记录，让这次结果从零写全（不残留上一轮的指纹）
             p.applied_keys = []
