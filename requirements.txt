@@ -14,5 +14,9 @@ certifi
 # 导出 Word（.docx）：标题层级 + 检查表表格
 python-docx>=1.1
 
+# 手稿审阅：PDF → DOCX（fitz 是 PyMuPDF 的导入名）
+# 缺失时导入 PDF 会明确报错、.docx 仍可用；但发布包应当带上。
+PyMuPDF>=1.24
+
 # 打包
 pyinstaller>=6.18,<7

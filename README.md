@@ -17,8 +17,28 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v1.2.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v1.2.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+### v1.2.1 · 手稿审阅可用性修复
+
+> **重要**：v1.2.0 的打包产物（exe / dmg）**不含**本版任何修复 —— 那些资产由 v1.2.0 tag
+> （较早的提交）构建。**请使用 v1.2.1 的产物。**
+
+- **一键审阅共享当前项目已导入的 Word**：原先已导入过稿子再点「一键审阅」仍会弹文件选择框，
+  且 `run_all` 会新建空白项目，把已选定的「审稿批注版」与落盘记录丢掉。
+  现在同一份稿件直接复用（并跳过重复解析），并在**同一个项目上继续**，沿用
+  `annotated_path`、课题关联与落盘记录。换稿则新建项目，不会把两份手稿混在一起。
+- **流式响应被掐断自动重试**：修复 `IncompleteRead(0 bytes read)` 导致整批审阅白跑。
+  `try` 原先只包住 `urlopen`，而读响应体的循环毫无保护。现在整个「发请求 + 读流」
+  都在重试保护内（指数退避 1s→2s→4s，默认 2 次，4xx/5xx 不重试）。
+  顺带修掉**静默截断**：服务端少发一半时 urllib 不报错，半截正文会被当成完整结果 —— 现已显式检测。
+- **失败不再静默**：`on_failed` 原先只写右栏流水一行，中栏仍显示「还没有导入手稿」；
+  现在状态行 + 流水 + 弹窗三处同时报错。
+- **打包版可命令行审阅**：新增 `manuscript_review`（别名 `mr`）子命令 ——
+  `PCLRadiomics.exe manuscript_review --selfcheck` 可在 exe 上直接自检子模块齐备性。
+- **构建加固**：spec 显式收集 `manuscript_review` 全部子模块 + 打包前置校验（缺模块即中止）；
+  CI 对**冻结产物**跑 `--selfcheck`，不齐备就让构建失败；`requirements.txt` 补上 PyMuPDF。
 
 ### v1.2.0 · 手稿缺陷审阅工作台（第 5 个原生视图）
 
