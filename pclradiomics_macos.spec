@@ -36,7 +36,8 @@ datas += collect_data_files("mcp")
 datas += collect_data_files("docx")   # python-docx 的默认模板 templates/default.docx 必须一起打包，否则导出 Word 会失败
 
 MODULES = ["app_paths", "stages_data", "llm_client", "design_agent",
-           "mcp_server", "api_server", "cli", "win_stdio"]
+           "mcp_server", "api_server", "cli", "win_stdio",
+           "docx_export", "manuscript_review"]
 HIDDEN = list(MODULES)
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi", "h11"):
@@ -44,6 +45,41 @@ for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
         HIDDEN += collect_submodules(pkg)
     except Exception:
         HIDDEN.append(pkg)
+
+
+def _collect_local(pkgs):
+    """收集本地包的全部子模块。
+
+    为什么必须显式收集：design_studio / cli 等是以 hiddenimports **硬编码**进来的，
+    PyInstaller 对 hiddenimport 不再递归分析其内部导入；而它们内部的
+    `from manuscript_review.mr_engine import ...` 又都写在**函数里**（延迟导入），
+    所以整条链路会被静默丢弃 —— 打包后运行时报 ModuleNotFoundError，
+    界面只显示“没有导入手稿”，完全看不出是缺模块。
+    这里对本地包做一次显式 collect_submodules，新增子模块时不必再改本文件。
+    """
+    out = []
+    for pkg in pkgs:
+        try:
+            out += collect_submodules(pkg)
+        except Exception:
+            out.append(pkg)
+    return out
+
+
+HIDDEN += _collect_local(("manuscript_review",))
+
+# —— 打包前置校验：把「硬编码 hiddenimports 的本地模块」逐个真实导入一次。
+#    任何一个导入失败都说明它自己或它依赖的本地模块没被收集，直接中止而不是产出坏包。
+_probe_fail = []
+for _m in ("design_studio", "omics_pipeline", "manuscript_review", "docx_export",
+           "mcp_server", "api_server"):
+    try:
+        __import__(_m)
+    except Exception as _e:                                        # noqa: BLE001
+        _probe_fail.append(f"{_m}: {type(_e).__name__}: {_e}")
+if _probe_fail:
+    raise SystemExit("[打包中止] 以下模块无法导入，打包会产出缺模块的坏包：\n  "
+                     + "\n  ".join(_probe_fail))
 
 
 def strip_mkl(binaries):

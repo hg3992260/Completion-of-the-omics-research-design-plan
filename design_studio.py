@@ -1674,9 +1674,48 @@ class ManuscriptReviewPage:
             self._log("（上面已有细节；可据此调整后重试。）", "muted")
 
     def on_failed(self, err: str):
+        """后台任务异常。**必须把失败顶到显眼位置** —— 只写流水等于没报错。
+
+        踩过的坑：打包后的 exe 里 manuscript_review 整个包没被打进去时，
+        `import manuscript_review.mr_engine` 抛 ModuleNotFoundError，
+        被这里接住后只往右栏「执行流水」写一行；中栏仍然显示「还没有导入手稿」、
+        左栏状态行也不动，用户看到的现象就是「导入了 Word 却还说没导入」，
+        完全不知道其实是缺模块。现在：状态行 + 右栏 + 弹窗三处都报，并给可执行的处置建议。
+        """
         self._busy(False)
-        self._log("!! 异常：\n" + err.splitlines()[0], "bad")
+        first = (err or "").splitlines()[0] if err else "未知错误"
+        hint = self._frozen_hint(err)
+        self._set_status(f"✗ 任务失败：{first[:70]}", "bad")
+        self._log("!! 异常：" + first, "bad")
+        if hint:
+            self._log(hint, "bad")
         self._log(err, "muted")
+        # 刷新一次：让中栏反映真实状态，而不是停在「还没有导入手稿」的假象上
+        try:
+            self.refresh()
+        except Exception:                                          # noqa: BLE001
+            pass
+        QtWidgets.QMessageBox.warning(
+            self.win, "手稿审阅失败",
+            first + ("\n\n" + hint if hint else "")
+            + "\n\n详细信息见右栏「执行流水」。")
+
+    @staticmethod
+    def _frozen_hint(err: str) -> str:
+        """识别「冻结包缺模块」这类错误，给出可执行的处置建议。"""
+        if "ModuleNotFoundError" not in (err or ""):
+            return ""
+        missing = ""
+        m = re.search(r"No module named '([^']+)'", err or "")
+        if m:
+            missing = m.group(1)
+        tip = (f"缺少模块：{missing}" if missing else "缺少某个模块")
+        if getattr(sys, "frozen", False):
+            return (f"{tip} —— 当前是**打包版**，说明编译时没把该功能收进包。"
+                    f"请用配套的 spec 重新编译（spec 里需显式 hiddenimports 本地模块；"
+                    f"design_studio/cli 是硬编码进来的，PyInstaller 不会跟进它们"
+                    f"函数内的延迟导入）。")
+        return f"{tip} —— 源码运行下请检查该模块文件是否在仓库中。"
 
     # ---------------------------------------------------------------- 打开产物
     def open_docx(self):

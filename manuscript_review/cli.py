@@ -50,6 +50,43 @@ def _print_layers() -> int:
     return 0
 
 
+def _print_selfcheck() -> int:
+    """逐个子模块自检 —— 用来确认「打包版里这个功能到底有没有被打进去」。
+
+    为什么需要：打包时若漏了本地模块（PyInstaller 对 hardcoded hiddenimports
+    不会递归分析其函数内的延迟导入），运行时会报 ModuleNotFoundError；
+    但失败被后台线程接住后只写进界面流水，看起来就像「点了没反应」。
+    这里在**不依赖界面**的情况下把每个子模块真实导入一次。
+    """
+    mods = ["mr_review_layers", "mr_docx", "mr_pdf", "mr_signals", "mr_reviewer",
+            "mr_office", "mr_word", "mr_report", "mr_engine", "mr_thread", "cli"]
+    print("手稿审阅 · 模块自检")
+    print(f"  运行方式 : {'打包版（frozen）' if getattr(sys, 'frozen', False) else '源码'}")
+    print(f"  解释器   : {sys.executable}")
+    print(f"  模块目录 : {os.path.dirname(os.path.abspath(__file__))}")
+    print()
+    bad = []
+    for m in mods:
+        try:
+            __import__(f"manuscript_review.{m}")
+            print(f"  ✓ manuscript_review.{m}")
+        except Exception as e:                                     # noqa: BLE001
+            bad.append(f"{m}: {type(e).__name__}: {e}")
+            print(f"  ✗ manuscript_review.{m}  —— {type(e).__name__}: {e}")
+    print()
+    if bad:
+        print(f"结果：{len(bad)}/{len(mods)} 个子模块导入失败。")
+        if getattr(sys, "frozen", False):
+            print("这是**打包版**：说明编译时这些模块没被收进包。"
+                  "请用配套 spec 重新编译（spec 里把本地模块显式放进 hiddenimports，"
+                  "并对本地包调用 collect_submodules）。")
+        else:
+            print("这是源码运行：请检查仓库中对应 .py 文件是否存在。")
+        return 1
+    print(f"结果：{len(mods)}/{len(mods)} 个子模块全部可导入。")
+    return 0
+
+
 def _print_toolchain() -> int:
     from manuscript_review import mr_office, mr_pdf, mr_word
     oc = mr_office.available()
@@ -104,9 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--name", default="", help="项目名（默认取文件名）")
     ap.add_argument("--layers-info", action="store_true", help="只看三层条目统计")
     ap.add_argument("--toolchain", action="store_true", help="只看外部依赖就绪情况")
+    ap.add_argument("--selfcheck", action="store_true",
+                    help="逐个子模块自检（打包版排查「功能没打进 exe」用）")
     ap.add_argument("--json", action="store_true", help="结果以 JSON 输出（便于管道）")
     args = ap.parse_args(argv)
 
+    if args.selfcheck:
+        return _print_selfcheck()
     if args.layers_info:
         return _print_layers()
     if args.toolchain:
