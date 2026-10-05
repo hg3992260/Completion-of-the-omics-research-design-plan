@@ -5,9 +5,10 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 | 程序 | 作用 | 启动 |
 |---|---|---|
-| **`design_studio.py`** | **主界面（桌面版）**：贴入初步实验设计 → LLM agent 按十阶段逐段追问与改写 → 输出可执行研究设计 | `启动_设计工作台.bat` |
+| **`design_studio.py`** | **主界面（桌面版）**：贴入初步实验设计 → LLM agent 按十阶段逐段追问与改写 → 输出可执行研究设计；含**五个原生视图**（设计工作台 / 统计 / SCI 结构 / 总览 / **手稿审阅**） | `启动_设计工作台.bat` |
 | `omics_pipeline.py` | 管线视图：十阶段检查表、评分与自评进度 | `启动.bat` |
 | **`web_server.py`** | **Web 版**：本地服务 + 浏览器界面，**Windows 7 上也能用**（无需 Qt）；四个视图都能编辑 | `启动_Web版.bat` |
+| **`manuscript_review/`** | **手稿缺陷审阅**（设计工作台的第 5 个视图）：导入已成稿手稿（PDF / Word），逐条对照三层架构找缺陷，并**自动把批注写回 Word**。见「九、手稿缺陷审阅」 | 同 `启动_设计工作台.bat`（流程条第 5 步）<br>或 `python -m manuscript_review.cli 手稿.docx` |
 | `pclradiomics_web_win7.spec` | **Web 版打包成 exe**（Win7 目标机不用装 Python） | `编译_Win7_Web版.bat` |
 
 ![设计工作台](_shots/studio_01_draft_dark.png)
@@ -16,11 +17,46 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v1.1.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v1.2.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
 
-> **开发中（未发布）**：**Web 版 Phase 0 / 1 / 2 + 互跳 + 真实统计计算 + Win7 exe 打包** ——
-> `web_server.py` + `web/`，本地服务 + 浏览器界面，让 Windows 7 也能用上完整界面
+### v1.2.0 · 手稿缺陷审阅工作台（第 5 个原生视图）
+
+- **新增 `manuscript_review/`**：把已成稿手稿导入后，逐条对照「引导式组学 / 统计 / SCI 写作」
+  **三套架构**找缺陷，并把缺陷**自动写回 Word**。界面是设计工作台的第 5 个原生视图，
+  与其余四页共用 PyCt6 + ui_kit 组件与主题，**不是新程序**。
+- **三层缺陷对照（315 条）**：全部派生自 `stages_data` / `stat_data` / `shape_data`
+  这三份既有数据，所以「引导式架构」与「审阅口径」永远同源，不存在第二套标准。
+- **两层检测**：`mr_signals.py` 的 **41 个确定性信号**（不需要 LLM，报可证据化的硬缺陷：
+  没写 ICC、没给管电压、没报告校准…）＋ `mr_reviewer.py` 的 **LLM 分层分批语义审阅**
+  （带内容哈希缓存与 JSON 容错解析）。确定性层已报的信号会被跳过，避免重复。
+- **自主落盘**：审阅跑完**自动**写 Word，不需要再点一步。三档可选 ——
+  `revise`（批注 + Track Changes 补写缺失报告项）/ `comment`（只挂批注不改正文）/
+  `report`（只出报告不碰 Word）；另有 `--incremental` 增量写，只落本次新增发现。
+- **四色修订**：绿 `00B050` 新增 · 红 `FF0000` 删除 · 蓝 `0070C0` 修改 · 橙 `ED7D31` 移动。
+- **并入审稿批注版**：匹配得上的发现作为**线程回复**挂在审稿意见下面，
+  Word 审阅窗格呈嵌套树状，审稿人原有批注一个字都不动。
+- **课题关联与双向联动**：导入时自动登记为当前课题的手稿附件并快照课题背景
+  （背景进入提示词，才能判出「手稿与课题意图不一致」类缺陷）；切换课题时自动切到其绑定手稿。
+- **导入支持 PDF**：先转 DOCX 转换稿，审阅与修订都作用于转换稿
+  （转换必然有损，公式/复杂表格/图注需人工核对；扫描件会明确报错提示先 OCR）。
+- **MCP 新增 8 个工具**（原 14 → 共 21）：`manuscript_review` 一条命令跑完「审阅 + 落盘 + 报告」。
+- **顺带修复两个既有问题**：
+  ① `StageRail.paintEvent` 的 `f"{id:02d}"` 只接受整数 id，传字符串 id 会在 Qt 回调内抛
+  `ValueError`，表现为整个进程 `0xC000041D` 访问冲突硬崩且**看不到任何 Python 报错** ——
+  已改为按 id 类型分支（原有整数 id 行为不变）；
+  ② 启动「一闪就没」：PATH 里的 `python` 常非装了 PySide6 的环境，只报一句
+  `ModuleNotFoundError` 就退出 —— 已加**解释器自举**（自动换到可用解释器）与启动异常兜底
+  （留住控制台并打印完整 traceback）。
+- **界面**：页脚 `继续 / 保存 / 导出` 由纯文字提示改为**真按钮**（带快捷键角标），
+  其中「继续」**按当前视图**决定文案与动作；审阅长任务期间底部动画胶囊 + 左栏状态行
+  都会显示当前步骤与**秒级计时**。
+
+> 详见「九、手稿缺陷审阅」与 [`manuscript_review/README.md`](manuscript_review/README.md)。
+
+### v1.1.2 · Web 版（Phase 0 / 1 / 2 + 互跳 + 真实统计计算 + Win7 exe 打包）
+
+> `web_server.py` + `web/`：本地服务 + 浏览器界面，让 Windows 7 也能用上完整界面
 > （Qt 6 与 WebView2 都不支持 Win7）。
 > Phase 0 打通四个视图与收敛推理；Phase 1 把**工作台**做成可编辑闭环
 > （研究设想 → 追问 → 回答 → 改写 → 采纳 → 汇总草案 → 导出 Markdown / Word，检查表可勾选）；
@@ -625,8 +661,8 @@ git push -u origin main
 
 | 文件 | 作用 |
 |---|---|
-| `design_studio.py` | 主界面：三栏工作台、Statistic 与 SCI Shape 视图、流式对话、阶段状态机、设置弹窗、导出 |
-| `design_agent.py` | agent 层：十阶段提示词、`【小节】`解析、输出清洗（剔除模型自我点评）、项目模型与文档渲染 |
+| `design_studio.py` | 主界面：**五个原生视图**（三栏工作台、Statistic、SCI Shape、总览、**手稿审阅**）、流式对话、阶段状态机、设置弹窗、导出 |
+| `design_agent.py` | agent 层：十阶段提示词、`【小节】`解析、输出清洗（剔除模型自我点评）、项目模型与文档渲染；**含手稿附件字段 `manuscripts`**（课题 ⇄ 手稿 关联） |
 | `llm_client.py` | OpenAI 兼容客户端：配置解析（含 agent 凭据）、流式 SSE、空正文自动重试、模型列表 |
 | `ui_kit.py` | 共享 UI：配色、自适应标签、**三维卡片/流程条/勾选框与底衬绘制**、进度条、对话视图 |
 | `omics_pipeline.py` | 管线视图（评分与检查表） |
@@ -648,6 +684,10 @@ git push -u origin main
 | `_test_web_exe.py` | **打包产物自检**：起真 exe，验内置 web 资源、接口、exe 同级落盘、SSE 通路、Word 导出、真实浏览器渲染 |
 | `_check_py38_annotations.py` / `_list_pe_deps.py` | 辅助脚本：前者扫"3.8 上会在导入时炸的注解写法"，后者列出 PE 的真实 DLL 依赖（用来定位冻结后缺哪个运行库） |
 | `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
+| `manuscript_review/` | **手稿缺陷审阅模块**（第 5 个视图的后端）：`mr_signals` 41 个确定性信号 / `mr_reviewer` LLM 语义审阅 / `mr_word` Word 批注与四色修订落盘 / `mr_thread` 并入审稿批注版做线程回复 / `mr_engine` 审阅编排与自主落盘 / `mr_docx` 结构解析 / `mr_pdf` PDF→DOCX / `cli` 命令行 |
+| `manuscript_review/examples/` | **纯合成样例**（`sample_manuscript.docx` 29 段含 16 处硬伤；`annotated_sample.docx` 3 条审稿意见）+ 生成脚本。**不含任何真实患者数据或未发表手稿** |
+| `manuscript_review/verify/` | 18 个端到端验证脚本 + `_bootstrap.py`（自动定位仓库根与样例、产物写到 `_verify_out/`）；全部基于上面的合成样例，可复现 README 中的验证结果 |
+| `manuscript_review/README.md` | 手稿审阅的**完整说明**：三层架构来源、两层检测原理、自主落盘三档、并入线程回复、课题关联与双向联动、11 条实测踩过的坑、已知限制 |
 
 数据与界面完全分离：`stages_data.py` 换内容，`design_agent.py` 换提示词，UI 不用改。
 
@@ -825,6 +865,156 @@ python _probe_web.py
 
 ---
 
+## 九、手稿缺陷审阅（第 5 个原生视图）
+
+**把上面三套架构换个用法**：不再是从零陪研究者写方案，而是**导入一份已成稿的手稿，
+逐条对照这三套架构找出缺陷，并把缺陷自动写回 Word**。
+
+界面不是新程序 —— 它是设计工作台的第 5 个原生视图，与其余四页共用同一套
+PyCt6 + ui_kit 组件与主题，入口就是原来的 `启动_设计工作台.bat`。
+
+### 它怎么工作
+
+```
+手稿.pdf  ──►  PDF→DOCX 转换稿  ──┐
+手稿.docx ──────────────────────┤
+                                ▼
+                  ① 解析结构：段落 + 段号锚点 + 章节映射
+                                ▼
+        ② 确定性核验（不需要 LLM）      ③ LLM 语义审阅
+        可证据化的硬缺陷：              语义判断：
+        「没写 ICC」「没给管电压」        「摘要缺成就组件」
+        「没报告校准」「没有注册号」      「Discussion 只是复述 Results」
+        「数据可向作者索取」              「结论强度超过证据」
+                   └────────┬───────────┘
+                            ▼
+                  合并去重（同一条只报一次）
+                            ▼
+        ④ 审阅报告 (Markdown / HTML / CSV)
+        ⑤ **自动**落回 Word：每条缺陷 = 一条批注；可采纳的修改 = 四色修订
+```
+
+### 三层缺陷对照（315 条审阅条目，全部派生自既有数据）
+
+| 层 | 数据源 | 条目 | 规范依据 |
+|---|---|---|---|
+| 引导式组学 | `stages_data.STAGES` | 89 | 十阶段 · TRIPOD+AI / CLEAR / METRICS / IBSI |
+| 统计 | `stat_data.STAGES` | 117 | 9 阶段 · SAP / 前提诊断 / 多重比较 / 报告规范 |
+| 撰写 | `shape_data.SHAPE` | 109 | Glasman-Deal《Science Research Writing》七章模型 |
+
+**审阅条目全部派生自上面三页的同一份数据**，所以「引导式架构」与「审阅口径」永远同源，
+不存在第二套标准 —— 改 `stages_data.py` 等数据文件，三页与审阅同时生效。
+
+**检测分两层**，这是刻意的设计：
+
+- **确定性核验**（`mr_signals.py`，41 个信号）：不需要 LLM 就能判定、且能给出证据的硬缺陷。
+  逐段正则检索，结论三档 —— `reported`（不生成缺陷）/ `weak`（信息不完整）/ `missing`（完全缺失）。
+  结论可复现、可追责，比模型更可靠。
+- **LLM 语义审阅**（`mr_reviewer.py`）：确定性层覆盖不到的语义判断。分层分批（每批 ≤10 条）、
+  按内容哈希缓存、强制 JSON 输出（支持三种容错解析）。确定性层已报的信号会被跳过，避免重复报同一件事。
+
+### 自主落盘：审阅跑完自动写 Word，不需要再点一步
+
+左栏「自主落盘」下拉框决定写到什么程度：
+
+| 档位 | 行为 | 实测（样例稿） |
+|---|---|---|
+| `revise`（默认） | 每条发现写一条 Word 批注 **+** 缺失报告项用 Track Changes 绿色补写占位段 | 31 批注 + 16 修订 |
+| `comment` | 只挂批注，**不增删任何正文**（结构还在调整时用） | 31 批注 + 0 修订 |
+| `report` | 只出报告，**完全不碰 Word** | 不产出 Word |
+
+**四色修订规范**（写在修订 run 的 `rPr` 上，显式颜色覆盖 Word 默认的按作者着色）：
+
+| 修改类型 | 颜色 | 附加格式 |
+|---|---|---|
+| 新增内容 | 绿 `00B050` | 下划线 |
+| 删除内容 | 红 `FF0000` | 删除线 |
+| 修改（替换） | 蓝 `0070C0` | 下划线 |
+| 移动 / 格式变更 | 橙 `ED7D31` | — |
+
+**两个硬约束**（都踩过）：
+
+1. **批注/回复必须在「补写段插入」之前写**。插入补写段会改变段落序号，
+   导致父批注与回复分处不同段落 → 无法嵌套 → Word 显示为平级。
+   所以落盘分三批：`find/replace` → 批注/回复 → 补写段（带段号位移补偿）。
+2. **必须用 OfficeCLI 的 `parentId`，不要自己插标记**。`reviewer-reply-docx` 技能文档说
+   「OfficeCLI 的 parentId 不会原生嵌套」是 **1.0.143 的旧行为**；实测 1.0.153 已修好，
+   它会同时写 `commentsExtended.xml` 并自动嵌套 range 标记（已用 Word COM 的
+   `Comment.Ancestor` 权威验证）。
+
+### 并入「审稿批注版」：把发现做成线程回复
+
+如果手上是**带审稿意见的批注版手稿**，可以让发现直接**作为回复挂在对应审稿意见下面**，
+在 Word 审阅窗格里呈嵌套树状，审稿人一眼能看到「就我这条意见，补充了什么」。
+审稿人原有批注**一个字都不动**。
+
+挂靠用可解释规则打分（依据写进报告）：同段落 +3.0 / 相邻段落 +1.2 /
+**强主题词**（ICC、校准、层厚、主模型…）+0.9 每个 / 弱词（「参数」「特征」）需≥2 个才计分。
+匹配不上的转为独立批注写在原段落，信息不丢。
+
+> 主题词必须分强弱 —— 早先把「参数」当强词，结果「伦理批号」被挂到了「扫描参数」
+> 那条意见下面（两者都含"参数"）。这种误挂靠比不挂靠更误导作者。
+
+### 课题关联与双向联动
+
+- **导入时**自动登记为工作台**当前课题**的手稿附件，并把课题背景（研究设想 + 各阶段定稿摘要）
+  **快照进审阅项目**
+- **语义审阅时**课题背景进入每批提示词 —— 这样才能判出「手稿与课题意图不一致」这类缺陷
+  （例如课题预设了「外院外部验证 + 前瞻队列」，手稿只报了单中心内部验证）
+- **切换课题**时自动切到该课题绑定的手稿；该课题没有手稿则清空审阅视图
+  （避免把上一个课题的手稿挂在本题下）
+
+课题 JSON 新增 `manuscripts` 字段；**旧项目加载得到 `[]`，不影响既有流程**。
+
+### 用法
+
+```bat
+:: GUI：启动后点流程条第 5 步「手稿审阅」
+启动_设计工作台.bat
+
+:: 命令行：一条命令跑完「审阅 + 自动落盘 + 报告」
+python -m manuscript_review.cli 手稿.docx
+python -m manuscript_review.cli 手稿.docx --skip-llm          :: 只跑确定性核验，不联网不花钱
+python -m manuscript_review.cli 手稿.docx --autonomy comment  :: 只挂批注，不改正文
+python -m manuscript_review.cli 审稿批注版.docx --annotated-info  :: 先看目标有几条审稿意见
+
+:: 自检
+python -m manuscript_review.cli --toolchain     :: OfficeCLI / PyMuPDF 就绪情况
+python -m manuscript_review.cli --layers-info   :: 三层条目统计
+```
+
+MCP 新增 8 个工具（原 14 → 共 21），agent 可一次调用跑完审阅并拿回落盘结果：
+
+```
+manuscript_review(path="稿件.pdf", layers="omics,stat,shape", autonomy="revise")
+manuscript_annotated_info(path="审稿批注版.docx")   # 有批注才走线程并入
+manuscript_defects(layer="omics", severity="关键")
+```
+
+### 依赖与已知限制
+
+依赖除既有的 Python / PySide6 / python-docx 外，多两项：
+
+| 组件 | 用途 | 缺失时 |
+|---|---|---|
+| **PyMuPDF** (`fitz`) | PDF → DOCX | 不能导入 PDF（.docx 仍可用） |
+| **OfficeCLI**（`npm i -g officecli`，≥ 1.0.150） | Word 批注 + Track Changes 修订 | 只能出报告，不能落盘 |
+
+1. **PDF 转换必然有损**：公式、复杂表格、图注可能失真；修订落在**转换稿**上，
+   最终定稿需把修订内容合并回原始排版稿。扫描件（无文字层）会明确报错，需先 OCR。
+2. **程序不替作者造数据**：标为「缺失」的补正段是**占位待补**文字，不是可直接投稿的内容。
+   需要重算才能定稿的条目（校准曲线、DCA、ICC）只出批注、不动正文。
+3. **LLM 判据不是金标准**：语义层可能误报或漏报，请自行复核；每条批注都标了来源
+   （确定性核验 / 语义审阅）便于区分。
+
+> 完整说明（含 11 条实测踩过的坑、并入线程回复的实现细节、验证记录）见
+> **[`manuscript_review/README.md`](manuscript_review/README.md)**；
+> 可复现的端到端验证脚本在 [`manuscript_review/verify/`](manuscript_review/verify/)，
+> 全部基于 [`manuscript_review/examples/`](manuscript_review/examples/) 的**纯合成样例**
+> （29 段含 16 处硬伤，不含任何真实患者数据）。
+
+---
+
 ## 四、自检命令
 
 ```bat
@@ -880,6 +1070,17 @@ D:\python\envs\mar\python.exe stat_tools.py
 D:\python\envs\mar\python.exe _test_web.py
 D:\python\envs\mar\python.exe _test_web_exe.py
 D:\python\envs\mar\python.exe _probe_web.py
+
+:: 手稿审阅：外部依赖就绪情况 + 三层条目统计
+D:\python\envs\mar\python.exe -m manuscript_review.cli --toolchain
+D:\python\envs\mar\python.exe -m manuscript_review.cli --layers-info
+
+:: 手稿审阅：端到端验证（基于 manuscript_review/examples/ 的合成样例，全部可复现）
+D:\python\envs\mar\python.exe manuscript_review\verify\e2e_signals_word.py  :: 核验 → Word 批注 + 四色修订
+D:\python\envs\mar\python.exe manuscript_review\verify\e2e_pdf.py           :: PDF → DOCX → 审阅落盘
+D:\python\envs\mar\python.exe manuscript_review\verify\e2e_mcp.py           :: MCP 工具逐个调用
+D:\python\envs\mar\python.exe manuscript_review\verify\test_auto.py         :: 自主落盘三档 + 增量去重
+D:\python\envs\mar\python.exe manuscript_review\verify\test_duo_link.py     :: 课题 ⇄ 手稿 双向联动
 ```
 
 ## 五、规范依据
