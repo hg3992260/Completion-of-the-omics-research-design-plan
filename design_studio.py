@@ -4060,9 +4060,15 @@ class StudioWindow(CMainWindow):
                 holder["reason"] += piece
                 tv.stream(piece, "muted")          # 推理过程用弱化色
                 return
+            if kind == "note":
+                # 传输层重试提示等运行态说明：只显示，**不能**混进正文累加器，
+                # 否则会被当成模型输出写进定稿。
+                tv.stream(piece, "muted")
+                return
+            if kind != "content":
+                return
             holder["text"] += piece
-            if kind == "content":
-                tv.stream(piece)
+            tv.stream(piece)
 
         self.thread = LLMThread(self.client, messages, stream=True, parent=self,
                                 max_tokens=max_tokens, reason=reason)

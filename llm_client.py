@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
+import socket
 import ssl
 import time
 import urllib.error
@@ -35,7 +37,54 @@ DEFAULTS = {
     # 推理模型的思考 token 也算进 max_tokens，预算给小了会「只想不说」返回空正文
     "max_tokens": 8000,
     "timeout": 240,
+    # 传输层瞬时故障的重试次数（不含首次尝试）。流式响应被中途掐断
+    # （IncompleteRead / ConnectionReset）几乎都是服务端或中间网络抖动，
+    # 重试一次通常就过；这一项就是为它准备的。
+    "retries": 2,
 }
+
+
+# --------------------------------------------------------------------------- 传输层故障
+# 这个元组里的异常都表示「请求本身没被拒绝，只是连接坏了」，重试有意义。
+# 注意：http.client.IncompleteRead 只继承 HTTPException，**不是** OSError 子类，
+# 必须单独列出，否则不会被当成可重试错误。
+RETRYABLE = (
+    http.client.IncompleteRead,          # 响应体读到一半连接断了（0 bytes read 也属此类）
+    http.client.RemoteDisconnected,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    socket.timeout,
+    TimeoutError,
+)
+
+
+def _describe_net_error(e: BaseException) -> str:
+    """把传输层异常翻译成能看懂、能据以处置的中文说明。"""
+    if isinstance(e, http.client.IncompleteRead):
+        got = len(e.partial or b"")
+        if got == 0:
+            return ("服务端已开始响应但一个字节都没送到就断开了"
+                    "（IncompleteRead: 0 bytes read）")
+        return (f"流式响应读到一半被掐断：已收到 {got} 字节，"
+                f"还差 {e.expected} 字节（IncompleteRead）")
+    if isinstance(e, http.client.RemoteDisconnected):
+        return "服务端主动断开了连接且没返回任何响应（RemoteDisconnected）"
+    if isinstance(e, (socket.timeout, TimeoutError)):
+        return "等待响应超时（可在「设置」里调大 timeout，或改用非流式）"
+    if isinstance(e, ConnectionResetError):
+        return "连接被重置（对端或中间网络设备强制断开）"
+    return f"{type(e).__name__}: {e}"
+
+
+def _is_retryable(e: BaseException) -> bool:
+    if isinstance(e, RETRYABLE):
+        return True
+    if isinstance(e, urllib.error.URLError):
+        # URLError 包了一层真实原因，需要拆开看
+        return isinstance(getattr(e, "reason", None), RETRYABLE) or \
+            isinstance(e, urllib.error.URLError)
+    return isinstance(e, OSError)
 
 
 # --------------------------------------------------------------------------- 配置
@@ -103,7 +152,7 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     """非敏感设置写便携配置；用户手填的密钥单独写用户配置目录（权限收紧到本人可读）。"""
     keep = {k: cfg[k] for k in ("base_url", "model", "temperature", "max_tokens", "timeout",
-                                "api_key_env", "credential_name")
+                                "retries", "api_key_env", "credential_name")
             if k in cfg}
     # 便携配置里永远不带密钥
     keep.pop("api_key", None)
@@ -179,20 +228,32 @@ class LLMClient:
                 "User-Agent": "omics-design-studio/1.0"}
 
     def _request(self, method: str, path: str, payload: dict | None):
+        """非流式请求。同样对传输层瞬时故障重试（read() 也会抛 IncompleteRead）。"""
         data = json.dumps(payload).encode() if payload is not None else None
         req = urllib.request.Request(self._url(path), data=data, headers=self._headers(),
                                      method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self.cfg.get("timeout", 180),
-                                        context=ssl_context()) as r:
-                return json.loads(r.read().decode("utf-8", "ignore"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "ignore")[:300]
-            raise LLMError(f"HTTP {e.code}：{detail}") from None
-        except urllib.error.URLError as e:
-            raise LLMError(f"网络错误：{e.reason}") from None
-        except Exception as e:                                    # noqa: BLE001
-            raise LLMError(f"请求失败：{e!r}") from None
+        attempts = max(1, int(self.cfg.get("retries", DEFAULTS["retries"])) + 1)
+        last_err: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.cfg.get("timeout", 180),
+                                            context=ssl_context()) as r:
+                    return json.loads(r.read().decode("utf-8", "ignore"))
+            except urllib.error.HTTPError as e:
+                # 服务端明确答复，重试无意义
+                detail = e.read().decode("utf-8", "ignore")[:300]
+                raise LLMError(f"HTTP {e.code}：{detail}") from None
+            except BaseException as e:                            # noqa: BLE001
+                if not _is_retryable(e):
+                    if isinstance(e, urllib.error.URLError):
+                        raise LLMError(f"网络错误：{e.reason}") from None
+                    raise LLMError(f"请求失败：{e!r}") from None
+                last_err = e
+                if attempt >= attempts:
+                    break
+                time.sleep(min(2 ** (attempt - 1), 8))
+        raise LLMError(f"请求失败（已重试 {attempts - 1} 次仍失败）："
+                       f"{_describe_net_error(last_err)}") from None
 
     # -- 对话 ---------------------------------------------------------------
     def chat(self, messages: list[dict], stream: bool = False, on_delta=None,
@@ -242,17 +303,46 @@ class LLMClient:
         return self._chat_stream(payload, on_delta, t0)
 
     def _chat_stream(self, payload: dict, on_delta, t0: float) -> dict:
+        """流式请求。传输层瞬时故障（尤其 IncompleteRead）自动重试。
+
+        踩过的坑：早先 try 只包住 urlopen，而响应体是在 `with resp:` 的 for 循环里读的，
+        循环没有任何保护 —— 一旦服务端把连接掐在半路（实测
+        `IncompleteRead(0 bytes read)`），异常就直接冒到上层，整批审阅白跑。
+        现在整个「发请求 + 读流」都在重试保护内。
+        """
+        attempts = max(1, int(self.cfg.get("retries", DEFAULTS["retries"])) + 1)
+        last_err: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._stream_once(payload, on_delta, t0, attempt)
+            except urllib.error.HTTPError as e:
+                # 4xx/5xx 是服务端明确答复，重试没意义
+                raise LLMError(f"HTTP {e.code}："
+                               f"{e.read().decode('utf-8', 'ignore')[:300]}") from None
+            except BaseException as e:                             # noqa: BLE001
+                if not _is_retryable(e):
+                    raise LLMError(f"请求失败：{_describe_net_error(e)}") from None
+                last_err = e
+                if attempt >= attempts:
+                    break
+                wait = min(2 ** (attempt - 1), 8)                  # 1s, 2s, 4s… 封顶 8s
+                if on_delta:
+                    on_delta(f"　[传输中断，{wait}s 后重试 "
+                             f"{attempt}/{attempts - 1}] {_describe_net_error(e)}\n",
+                             "note")
+                time.sleep(wait)
+        raise LLMError(f"请求失败（已重试 {attempts - 1} 次仍失败）："
+                       f"{_describe_net_error(last_err)}") from None
+
+    def _stream_once(self, payload: dict, on_delta, t0: float,
+                     attempt: int = 1) -> dict:
         req = urllib.request.Request(self._url("/chat/completions"),
                                      data=json.dumps(payload).encode(),
                                      headers=self._headers(), method="POST")
         content, reasoning, usage, model, finish = [], [], {}, self.model, ""
-        try:
-            resp = urllib.request.urlopen(req, timeout=self.cfg.get("timeout", 180),
+        saw_done = False
+        resp = urllib.request.urlopen(req, timeout=self.cfg.get("timeout", 180),
                                       context=ssl_context())
-        except urllib.error.HTTPError as e:
-            raise LLMError(f"HTTP {e.code}：{e.read().decode('utf-8', 'ignore')[:300]}") from None
-        except Exception as e:                                     # noqa: BLE001
-            raise LLMError(f"网络错误：{e!r}") from None
 
         with resp:
             for raw in resp:
@@ -261,6 +351,7 @@ class LLMClient:
                     continue
                 chunk = line[5:].strip()
                 if chunk == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     d = json.loads(chunk)
@@ -284,8 +375,18 @@ class LLMClient:
                         reasoning.append(rc)
                         if on_delta:
                             on_delta(rc, "reasoning")
+        if not content and not reasoning and not finish:
+            # 连接建立、也没报错，但一个有效 delta 都没收到 —— 同样算传输失败，可重试
+            raise http.client.IncompleteRead(b"", 0)
+        # 流既没给 [DONE] 也没有 finish_reason，说明响应被中途截断了。
+        # 这种情况 urllib **不会抛异常**（实测：服务端声明 Content-Length 却少发一半、
+        # 或 chunked 发一半就断，for 循环都只是安静结束），于是半截正文会被当成完整结果
+        # 写进定稿 —— 比抛错更危险。这里显式当作可重试的传输故障。
+        if not saw_done and not finish:
+            raise http.client.IncompleteRead("".join(content).encode("utf-8"), 1)
         return {"content": "".join(content), "reasoning": "".join(reasoning),
                 "usage": usage, "model": model, "finish_reason": finish,
+                "attempts": attempt,
                 "elapsed": time.time() - t0}
 
 

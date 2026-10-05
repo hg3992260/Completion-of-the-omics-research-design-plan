@@ -618,6 +618,12 @@ class Handler(BaseHTTPRequestHandler):
             agent = DesignAgent(client(), project)
 
             def on_delta(piece, k):
+                # "note" 是运行态说明（例如传输中断后正在重试）。
+                # 它绝不能当正文发出去，否则会混进模型输出；
+                # 前端只认 status/reasoning/content/error/done，所以映射成 status。
+                if k == "note":
+                    self._write_sse({"type": "status", "text": piece.strip()})
+                    return
                 self._emit("reasoning" if k == "reasoning" else "content", piece)
 
             try:
