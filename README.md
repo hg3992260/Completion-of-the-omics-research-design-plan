@@ -11,7 +11,7 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 | **`manuscript_review/`** | **手稿缺陷审阅**（设计工作台的第 5 个视图）：导入已成稿手稿（PDF / Word），逐条对照三层架构找缺陷，并**自动把批注写回 Word**。见「九、手稿缺陷审阅」 | 同 `启动_设计工作台.bat`（流程条第 5 步）<br>或 `python -m manuscript_review.cli 手稿.docx` |
 | `pclradiomics_web_win7.spec` | **Web 版打包成 exe**（Win7 目标机不用装 Python） | `编译_Win7_Web版.bat` |
 
-![设计工作台](_shots/studio_01_draft_dark.png)
+![设计工作台：十阶段流程 + 三栏工作区，流程条第 5 步即「手稿审阅」](_shots/studio_01_light_default.png)
 
 ---
 
@@ -414,7 +414,7 @@ Statistic 与 SCI Shape 页的中间栏都切换两种模式：
 自动勾选、收敛度提升、落盘与重载）。
 
 ## 三、管线视图（评分与检查表）
-![管线视图](_shots/01_dark_default.png)
+![管线视图：左侧十阶段节点、中间阶段详情、右侧规范出处与本案例状态](_shots/01_light_default.png)
 
 左侧十阶段管线（自绘节点 + 连接箭头，已完成段落连线变青）、中间阶段详情（目标 / 可勾选的必做动作 /
 必报参数）、右侧本案例达标-部分-缺失自评与常见缺陷；勾选计入进度，导出 Markdown 检查表，
@@ -430,7 +430,7 @@ Statistic 与 SCI Shape 页的中间栏都切换两种模式：
   可关闭，`--shot/--e2e/--demo` 模式下自动跳过）。
   重新生成图标资源：把新图覆盖 `LOGO.jpg` 后运行 README 同目录的生成脚本即可（见下）。
 
-## 三、把程序当作服务提供（MCP / OpenAI API）
+## 四、把程序当作服务提供（MCP / OpenAI API）
 
 程序的后端本来就是三层解耦的 —— `llm_client.py`（传输）/ `design_agent.py`（提示词与领域逻辑）/
 `stages_data.py`（标准流程知识），所以两种对外服务都只是薄封装，**无需改动主程序**。
@@ -657,42 +657,6 @@ git push -u origin main
   `dist/`、`build/`、`_*.txt` 等；本仓库文件经检查**不含任何明文 API Key**
   （密钥由运行期从环境变量或 `~/.dsh/.credentials.yaml` 读取）。
 
-## 七、文件说明
-
-| 文件 | 作用 |
-|---|---|
-| `design_studio.py` | 主界面：**五个原生视图**（三栏工作台、Statistic、SCI Shape、总览、**手稿审阅**）、流式对话、阶段状态机、设置弹窗、导出 |
-| `design_agent.py` | agent 层：十阶段提示词、`【小节】`解析、输出清洗（剔除模型自我点评）、项目模型与文档渲染；**含手稿附件字段 `manuscripts`**（课题 ⇄ 手稿 关联） |
-| `llm_client.py` | OpenAI 兼容客户端：配置解析（含 agent 凭据）、流式 SSE、空正文自动重试、模型列表 |
-| `ui_kit.py` | 共享 UI：配色、自适应标签、**三维卡片/流程条/勾选框与底衬绘制**、进度条、对话视图 |
-| `omics_pipeline.py` | 管线视图（评分与检查表） |
-| `stages_data.py` | **十阶段内容**（目标 / 必做动作 / 必报参数 / 常见缺陷 / 本案例状态 / 规范条目）——改这里即可换课题 |
-| `shape_data.py` | **SCI 七章 scope**（功能定位 / 通用模型组件 / 内容边界 / 语言时态 / 词块组 / 自检项，均带书内页码）——SCI Shape 页的数据源，改这里即可换模板 |
-| `stat_data.py` | **统计九阶段 scope**（目标与核心动作 / 示例化表述 / 公式 / 常见陷阱 / 输出 / 对应工具 / 自检项）+ 12 行常用检验速查表 —— Statistic 页的数据源 |
-| `scope_core.py` | 两页共用的 scope 逻辑（勾选记录、进度、状态、汇总），UI 与数据都不依赖它以外的东西 |
-| `theme_tech.json` | PyCt6 主题：**浅色 = 极简蓝白，深色 = 亮橙科技**（8 个控件段，深浅双色） |
-| `LOGO.jpg` → `logo_icon.ico` / `logo_mark.png` / `logo_badge.png` / `logo_banner.png` | 由原图派生的图标资源：多尺寸 `.ico`（16–256）用于窗口/任务栏/快捷方式，方版徽标与 28×28 角标用于界面，全幅图用于启动画面 |
-| `组学研究设计工作台.lnk` / `标准流程管线.lnk` | 带图标的 Windows 快捷方式，双击即启动（可拖到桌面/任务栏） |
-| `projects/` | 课题项目存档（JSON，自动保存） |
-| `llm_config.json` | 非敏感配置（模型、温度、预算）；密钥仅在手工填写时写入 |
-| `启动_设计工作台.bat` / `启动.bat` | 一键启动（自动选用已装 PyCt6 的解释器） |
-| `web_server.py` | **Web 版内核**：纯标准库本地服务（Python 3.8 兼容），把项目 / 十阶段工作台 / 统计与 SCI 的 scope 引导 / 收敛推理 / 导出以 HTTP + SSE 暴露给浏览器；无 Qt 依赖 |
-| `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），四个视图（工作台 + 两个 scope 页可编辑）+ 流程条 + 流式输出；**无任何外链资源**，离线可用 |
-| `启动_Web版.bat` | Web 版一键启动：找 Python（3.8 起）→ 起服务 → 优先用 Chrome/Edge/Firefox 打开界面 |
-| `pclradiomics_web_win7.spec` / `编译_Win7_Web版.bat` | **Web 版打包成 exe**（Python 3.8，无 Qt）：产出文件夹版与单文件版，并显式带上 OpenSSL / libxml2 一族 DLL；构建后自动跑 PE 兼容检查与端到端自检。加 `scipy` 参数则把 numpy/scipy 一起打进去（22 MB → 190 MB） |
-| `stat_tools.py` | **统计计算层**：16 种假设检验 + 描述统计/正态性/方差齐性 + 效应量与 CI + 样本量估算 + 多重比较校正（纯 numpy/scipy，惰性导入，缺库时给出原因而不是崩） |
-| `_test_web_exe.py` | **打包产物自检**：起真 exe，验内置 web 资源、接口、exe 同级落盘、SSE 通路、Word 导出、真实浏览器渲染 |
-| `_check_py38_annotations.py` / `_list_pe_deps.py` | 辅助脚本：前者扫"3.8 上会在导入时炸的注解写法"，后者列出 PE 的真实 DLL 依赖（用来定位冻结后缺哪个运行库） |
-| `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
-| `manuscript_review/` | **手稿缺陷审阅模块**（第 5 个视图的后端）：`mr_signals` 41 个确定性信号 / `mr_reviewer` LLM 语义审阅 / `mr_word` Word 批注与四色修订落盘 / `mr_thread` 并入审稿批注版做线程回复 / `mr_engine` 审阅编排与自主落盘 / `mr_docx` 结构解析 / `mr_pdf` PDF→DOCX / `cli` 命令行 |
-| `manuscript_review/examples/` | **纯合成样例**（`sample_manuscript.docx` 29 段含 16 处硬伤；`annotated_sample.docx` 3 条审稿意见）+ 生成脚本。**不含任何真实患者数据或未发表手稿** |
-| `manuscript_review/verify/` | 18 个端到端验证脚本 + `_bootstrap.py`（自动定位仓库根与样例、产物写到 `_verify_out/`）；全部基于上面的合成样例，可复现 README 中的验证结果 |
-| `manuscript_review/README.md` | 手稿审阅的**完整说明**：三层架构来源、两层检测原理、自主落盘三档、并入线程回复、课题关联与双向联动、11 条实测踩过的坑、已知限制 |
-
-数据与界面完全分离：`stages_data.py` 换内容，`design_agent.py` 换提示词，UI 不用改。
-
----
-
 ## 八、Web 版（浏览器界面，Windows 7 可用）
 
 **形态**：本机起一个只绑 `127.0.0.1` 的服务，双击后自动用系统浏览器打开界面。
@@ -873,6 +837,8 @@ python _probe_web.py
 界面不是新程序 —— 它是设计工作台的第 5 个原生视图，与其余四页共用同一套
 PyCt6 + ui_kit 组件与主题，入口就是原来的 `启动_设计工作台.bat`。
 
+![手稿审阅页：左栏三层 rail 与审阅层次/自主落盘，中栏本层缺陷明细与章节映射，右栏审阅统计与执行流水](_shots/studio_05_manuscript_review.png)
+
 ### 它怎么工作
 
 ```
@@ -1015,7 +981,43 @@ manuscript_defects(layer="omics", severity="关键")
 
 ---
 
-## 四、自检命令
+## 十、文件说明
+
+| 文件 | 作用 |
+|---|---|
+| `design_studio.py` | 主界面：**五个原生视图**（三栏工作台、Statistic、SCI Shape、总览、**手稿审阅**）、流式对话、阶段状态机、设置弹窗、导出 |
+| `design_agent.py` | agent 层：十阶段提示词、`【小节】`解析、输出清洗（剔除模型自我点评）、项目模型与文档渲染；**含手稿附件字段 `manuscripts`**（课题 ⇄ 手稿 关联） |
+| `llm_client.py` | OpenAI 兼容客户端：配置解析（含 agent 凭据）、流式 SSE、空正文自动重试、模型列表 |
+| `ui_kit.py` | 共享 UI：配色、自适应标签、**三维卡片/流程条/勾选框与底衬绘制**、进度条、对话视图 |
+| `omics_pipeline.py` | 管线视图（评分与检查表） |
+| `stages_data.py` | **十阶段内容**（目标 / 必做动作 / 必报参数 / 常见缺陷 / 本案例状态 / 规范条目）——改这里即可换课题 |
+| `shape_data.py` | **SCI 七章 scope**（功能定位 / 通用模型组件 / 内容边界 / 语言时态 / 词块组 / 自检项，均带书内页码）——SCI Shape 页的数据源，改这里即可换模板 |
+| `stat_data.py` | **统计九阶段 scope**（目标与核心动作 / 示例化表述 / 公式 / 常见陷阱 / 输出 / 对应工具 / 自检项）+ 12 行常用检验速查表 —— Statistic 页的数据源 |
+| `scope_core.py` | 两页共用的 scope 逻辑（勾选记录、进度、状态、汇总），UI 与数据都不依赖它以外的东西 |
+| `theme_tech.json` | PyCt6 主题：**浅色 = 极简蓝白，深色 = 亮橙科技**（8 个控件段，深浅双色） |
+| `LOGO.jpg` → `logo_icon.ico` / `logo_mark.png` / `logo_badge.png` / `logo_banner.png` | 由原图派生的图标资源：多尺寸 `.ico`（16–256）用于窗口/任务栏/快捷方式，方版徽标与 28×28 角标用于界面，全幅图用于启动画面 |
+| `组学研究设计工作台.lnk` / `标准流程管线.lnk` | 带图标的 Windows 快捷方式，双击即启动（可拖到桌面/任务栏） |
+| `projects/` | 课题项目存档（JSON，自动保存） |
+| `llm_config.json` | 非敏感配置（模型、温度、预算）；密钥仅在手工填写时写入 |
+| `启动_设计工作台.bat` / `启动.bat` | 一键启动（自动选用已装 PyCt6 的解释器） |
+| `web_server.py` | **Web 版内核**：纯标准库本地服务（Python 3.8 兼容），把项目 / 十阶段工作台 / 统计与 SCI 的 scope 引导 / 收敛推理 / 导出以 HTTP + SSE 暴露给浏览器；无 Qt 依赖 |
+| `web/`（`index.html` / `app.css` / `app.js` / `favicon.svg`） | Web 版界面：拟物化三维样式（深浅双色），四个视图（工作台 + 两个 scope 页可编辑）+ 流程条 + 流式输出；**无任何外链资源**，离线可用 |
+| `启动_Web版.bat` | Web 版一键启动：找 Python（3.8 起）→ 起服务 → 优先用 Chrome/Edge/Firefox 打开界面 |
+| `pclradiomics_web_win7.spec` / `编译_Win7_Web版.bat` | **Web 版打包成 exe**（Python 3.8，无 Qt）：产出文件夹版与单文件版，并显式带上 OpenSSL / libxml2 一族 DLL；构建后自动跑 PE 兼容检查与端到端自检。加 `scipy` 参数则把 numpy/scipy 一起打进去（22 MB → 190 MB） |
+| `stat_tools.py` | **统计计算层**：16 种假设检验 + 描述统计/正态性/方差齐性 + 效应量与 CI + 样本量估算 + 多重比较校正（纯 numpy/scipy，惰性导入，缺库时给出原因而不是崩） |
+| `_test_web_exe.py` | **打包产物自检**：起真 exe，验内置 web 资源、接口、exe 同级落盘、SSE 通路、Word 导出、真实浏览器渲染 |
+| `_check_py38_annotations.py` / `_list_pe_deps.py` | 辅助脚本：前者扫"3.8 上会在导入时炸的注解写法"，后者列出 PE 的真实 DLL 依赖（用来定位冻结后缺哪个运行库） |
+| `_shots/` | 界面截图（`--shot` / `--demo --shot` 自检生成） |
+| `manuscript_review/` | **手稿缺陷审阅模块**（第 5 个视图的后端）：`mr_signals` 41 个确定性信号 / `mr_reviewer` LLM 语义审阅 / `mr_word` Word 批注与四色修订落盘 / `mr_thread` 并入审稿批注版做线程回复 / `mr_engine` 审阅编排与自主落盘 / `mr_docx` 结构解析 / `mr_pdf` PDF→DOCX / `cli` 命令行 |
+| `manuscript_review/examples/` | **纯合成样例**（`sample_manuscript.docx` 29 段含 16 处硬伤；`annotated_sample.docx` 3 条审稿意见）+ 生成脚本。**不含任何真实患者数据或未发表手稿** |
+| `manuscript_review/verify/` | 18 个端到端验证脚本 + `_bootstrap.py`（自动定位仓库根与样例、产物写到 `_verify_out/`）；全部基于上面的合成样例，可复现 README 中的验证结果 |
+| `manuscript_review/README.md` | 手稿审阅的**完整说明**：三层架构来源、两层检测原理、自主落盘三档、并入线程回复、课题关联与双向联动、11 条实测踩过的坑、已知限制 |
+
+数据与界面完全分离：`stages_data.py` 换内容，`design_agent.py` 换提示词，UI 不用改。
+
+---
+
+## 十一、自检命令
 
 ```bat
 :: 主界面：离线假对话 + 截图（不调用网络）
@@ -1083,7 +1085,9 @@ D:\python\envs\mar\python.exe manuscript_review\verify\test_auto.py         :: �
 D:\python\envs\mar\python.exe manuscript_review\verify\test_duo_link.py     :: 课题 ⇄ 手稿 双向联动
 ```
 
-## 五、规范依据
+---
+
+## 十二、规范依据
 
 - **CLEAR**（58 项）Kocak B, et al. Insights Imaging 2023 · doi:10.1186/s13244-023-01415-8
 - **METRICS**（30 项 / 9 类）Kocak B, et al. Insights Imaging 2024 · doi:10.1186/s13244-023-01572-w

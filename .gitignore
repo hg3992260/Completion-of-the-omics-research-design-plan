@@ -19,11 +19,19 @@ build-web-scipy/
 *.manifest
 
 # 自检/调试输出（脚本本身保留，输出不入库）
-_shots/
+# _shots/ 里绝大多数是调试用图，但 README 直接嵌了下面这几张，
+# 必须入库，否则 GitHub 上图片全是坏链。
+_shots/*
+!_shots/studio_01_light_default.png
+!_shots/studio_05_manuscript_review.png
+!_shots/01_light_default.png
 _pmtest/
 _*.log
 _*.txt
 *.log
+
+# 界面「导出检查表」的产物（带日期戳，每次导出都会新增一份）
+标准流程检查表_*.md
 
 # Python
 __pycache__/
