@@ -19,6 +19,75 @@ import sys
 import subprocess
 import time
 
+# --------------------------------------------------------------------------- 解释器自举
+# 为什么需要这一小段：
+# PATH 里的 `python` 常常不是装了 PySide6 的那个环境（本机默认是 miniconda base 3.14，
+# 没有 PySide6）。此时直接 `python design_studio.py` 会只抛一条
+# ModuleNotFoundError: No module named 'PySide6' 就结束 —— 在双击/无控制台时
+# 表现为「窗口一闪就没了」，非常难查。
+# 这里在导入 PySide6 之前先探测本机有没有带 PySide6 的解释器，
+# 有就用它把自己重启一遍，让 `python design_studio.py` 与双击 bat 行为一致。
+# 只处理「PySide6 缺失」这一种情况，且最多重启一次（用环境变量防循环）。
+_BOOTSTRAP_FLAG = "PCLRADIOMICS_RELAUNCHED"
+_PY_CANDIDATES = (
+    r"D:\python\envs\mar\python.exe",
+    r"D:\python\envs\rsna311\python.exe",
+    r"D:\python\envs\web38\python.exe",
+    os.path.join(os.path.expanduser("~"), "miniconda3", "envs", "mar", "python.exe"),
+)
+_PY_PROBE = "import PySide6, PyCt6"
+
+
+def _bootstrap_interpreter() -> None:
+    """当前解释器缺 PySide6 时，换一个能用的重启本脚本。"""
+    if os.environ.get(_BOOTSTRAP_FLAG):
+        return
+    try:
+        import PySide6          # noqa: F401
+        import PyCt6            # noqa: F401
+        return
+    except Exception:                                       # noqa: BLE001
+        pass
+
+    cands = []
+    for p in _PY_CANDIDATES:
+        if p and os.path.exists(p) and os.path.abspath(p) != os.path.abspath(sys.executable):
+            cands.append(p)
+    # 再兜底试一下 PATH 里其它 python（可能装着 PySide6）
+    for name in ("python3", "py"):
+        exe = None
+        from shutil import which
+        exe = which(name)
+        if exe and os.path.abspath(exe) != os.path.abspath(sys.executable):
+            cands.append(exe)
+
+    for exe in cands:
+        try:
+            r = subprocess.run([exe, "-c", _PY_PROBE], capture_output=True, timeout=25)
+            if r.returncode != 0:
+                continue
+        except Exception:                                   # noqa: BLE001
+            continue
+        env = dict(os.environ)
+        env[_BOOTSTRAP_FLAG] = "1"
+        # 用同一个脚本重启；父进程直接退出，界面由新解释器接管
+        os.execve(exe, [exe, os.path.abspath(__file__)] + sys.argv[1:], env)
+        return
+    # 没有任何带 PySide6 的解释器 → 给出可执行的提示，而不是一句 ModuleNotFound
+    sys.stderr.write(
+        "\n[启动失败] 当前解释器缺少 PySide6，界面无法启动。\n"
+        f"  当前解释器：{sys.executable}\n"
+        f"  Python 版本：{sys.version.split()[0]}\n\n"
+        "请在装了 PySide6 的环境里运行，例如：\n"
+        r"  D:\python\envs\mar\python.exe design_studio.py" + "\n"
+        "或直接双击： 启动_设计工作台.bat\n\n"
+        "若确实想用当前环境，先安装依赖：\n"
+        "  pip install PySide6\n\n")
+    sys.exit(2)
+
+
+_bootstrap_interpreter()
+
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QSizePolicy, QSpacerItem,
@@ -247,7 +316,17 @@ class StageRail(QWidget):
             p.setPen(QtGui.QPen(QtGui.QColor(C("bevel_lo")), 1.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(kr.adjusted(0.5, 0.5, -0.5, -0.5))
-            printed = "✓" if state == "done" else f"{st['id']:02d}"
+            # 旋钮里的编号：原十阶段/统计/七章的 id 都是整数（1..10），
+            # 但 StageRail 是通用组件，id 也可能是字符串（如 omics / stat / shape）。
+            # 注意：这里**绝不能**直接写 f"{st['id']:02d}" —— 字符串 id 会抛
+            # ValueError("Unknown format code 'd'")，而它在 paintEvent 里执行，
+            # 等于在 Qt 回调内抛异常，会导致整个进程硬崩（0xC000041D 访问冲突），
+            # 而不是打印一条 Python 报错。
+            _sid = st["id"]
+            if isinstance(_sid, int):
+                printed = "✓" if state == "done" else f"{_sid:02d}"
+            else:
+                printed = "✓" if state == "done" else str(_sid)[:2].upper()
             p.setPen(QtGui.QPen(QtGui.QColor(
                 "#FFFFFF" if (active or state == "done") else C("muted_dim"))))
             p.setFont(f_n)
@@ -994,6 +1073,964 @@ class ShapeScopePage(ScopePage):
         return "\n".join(lines) or "（模型未给出本章结论）"
 
 
+# --------------------------------------------------------------------------- 手稿审阅页
+# 复用「引导式组学 / 统计 / 撰写」三套架构的规范数据，但换个用法：
+# 不再是陪研究者从零写方案，而是导入一份已成稿的手稿（PDF / Word），
+# 逐条对照三层架构找缺陷，并把缺陷落回 Word（原生批注 + 四色 Track Changes 修订）。
+# 相关实现全部在 manuscript_review/ 包里，本文件只负责把它接成第 5 个原生视图。
+MR_SEV_TONE = {"关键": "bad", "主要": "warn", "一般": "muted"}
+MR_SEV_MARK = {"关键": "■", "主要": "▲", "一般": "●"}
+
+# 各操作的忙碌文案（显示在底部动画胶囊与左栏状态行）
+_MR_ACT_LABEL = {
+    "import": "正在导入手稿并解析结构",
+    "signals": "正在跑确定性核验",
+    "review": "正在做语义审阅（LLM）",
+    "report": "正在生成审阅报告",
+    "apply": "正在写入 Word 批注与修订",
+    "all": "正在跑一键审阅全流程",
+}
+
+
+class ManuscriptWorker(QtCore.QThread):
+    """后台跑审阅流水线：导入 / 核验 / 语义审阅 / 报告 / 落盘。"""
+
+    step = Signal(str, str)          # (步骤, 消息)
+    batch = Signal(str, int, int, bool, str)   # (层, 批号, 缺陷数, 是否缓存, 错误)
+    done = Signal(bool, str)
+    failed = Signal(str)
+
+    def __init__(self, win, act: str, path: str = "", layers=None,
+                 skip_llm: bool = False, mode: str = "dual",
+                 autonomy: str = "revise", parent=None):
+        super().__init__(parent)
+        self.win, self.act, self.path = win, act, path
+        self.layers, self.skip_llm, self.mode = layers, skip_llm, mode
+        self.autonomy = autonomy
+
+    def run(self):
+        try:
+            from manuscript_review.mr_engine import RevEngine, ReviewProject
+            eng = RevEngine(self.win.client)
+            proj = getattr(self.win, "mr_project", None) or ReviewProject()
+            act = self.act
+            if act == "all":
+                # 自主落盘：导入 → 核验 → 审阅 → 自动写 Word 批注 → 报告
+                # design=当前工作台课题：自动登记为该课题的手稿附件，并把课题背景带入审阅
+                ok, msg, proj = eng.run_all(
+                    self.path, layers=self.layers, skip_llm=self.skip_llm,
+                    autonomy=self.autonomy,
+                    merge_into=getattr(self.win, "mr_merge_into", "") or "",
+                    reply_mode=getattr(self.win, "mr_reply_mode", "reply"),
+                    fresh=True, design=getattr(self.win, "project", None),
+                    on_step=lambda s, m: self.step.emit(s, m))
+            elif act == "import":
+                ok, msg, proj = eng.ingest(self.path, proj,
+                                           design=getattr(self.win, "project", None))
+                self.step.emit("import", msg)
+            elif act == "signals":
+                ok, msg, proj = eng.run_signals(proj)
+                self.step.emit("signals", msg)
+            elif act == "review":
+                ok, msg, proj = eng.run_review(
+                    proj, layers=self.layers,
+                    on_progress=lambda c: self.batch.emit(
+                        c.layer, c.batch_index, len(c.defects), c.cached,
+                        c.error or ""))
+                self.step.emit("review", msg)
+            elif act == "report":
+                ok, msg, proj = eng.build_report(proj)
+                self.step.emit("report", msg)
+            elif act == "apply":
+                # 若用户选过「审稿批注版」，就把发现作为线程回复并入它
+                ok, msg, proj = eng.apply_to_word(
+                    proj, mode=self.mode,
+                    merge_into=getattr(self.win, "mr_merge_into", "") or "",
+                    reply_mode=getattr(self.win, "mr_reply_mode", "reply"))
+                self.step.emit("apply", msg)
+            else:
+                ok, msg = False, f"未知操作：{act}"
+            self.win.mr_project = proj
+            self.done.emit(ok, msg)
+        except Exception as e:                                     # noqa: BLE001
+            import traceback
+            self.failed.emit(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+
+
+class ManuscriptReviewPage:
+    """手稿审阅页：三栏布局与 StageRail / Card / CButton 全部沿用原生组件。
+
+    左栏  三层架构步骤条（组学 / 统计 / 撰写）+ 导入与开跑按钮
+    中栏  选中层的缺陷明细（或手稿概览）
+    右栏  审阅统计、缺陷总览、执行流水、落盘与报告
+    """
+
+    def __init__(self, win):
+        self.win = win
+        self.cur = 0
+        self.data = self._rail_items()
+
+        body = QWidget(win)
+        self.body = body
+        blay = QHBoxLayout(body)
+        blay.setContentsMargins(0, 0, 0, 0)
+        blay.setSpacing(14)
+
+        # ---------------- 左栏：三层架构步骤条
+        left = Card(win, margin=(14, 14, 14, 14), spacing=10)
+        self.left = left
+        left.setFixedWidth(320 + 2 * CARD_PAD)
+        ll = left.layout()
+        ll.addWidget(mk_label(left, "手稿审阅三层架构", size=12, bold=True,
+                              color=PAL["accent"], width_px=280))
+        ll.addWidget(mk_label(left,
+                              "导入已成稿手稿，逐条对照三层规范找缺陷；"
+                              "条目与「设计 / 统计 / 结构」三页同源。",
+                              size=8, width_px=280, wrap=True, color=PAL["muted"]))
+        self.scroll = WorkScroll(left)
+        self.rail = StageRail(self.scroll, self.data)
+        self.rail.stageClicked.connect(self.pick)
+        self.scroll.setWidget(self.rail)
+        # 关键：三层 rail 的内容高度是固定的（3×50+间隙），
+        # 若让它 Expanding，按钮会被挤到 rail 的绘制区上而重叠。
+        # 这里按内容高度锁死，并把 9 个按钮交给外层滚动区（见下）。
+        self.scroll.setFixedHeight(self.rail.height() + 6)
+        ll.addWidget(self.scroll)
+
+        # 布局要点：左栏空间有限，**所有非 rail 内容合并进同一个滚动区**。
+        # 早先把「审阅层次 / 自主落盘」直接插在 rail 与按钮之间，
+        # 结果左栏总高超出可用空间，这些控件被压到了 StageRail 的绘制区上而重叠。
+        # 现在只保留 rail（高度锁死）+ 状态行，其余全部交给下面这个滚动区。
+        self.left_status = mk_label(left, "", size=9, width_px=280, color=PAL["muted"])
+        ll.addWidget(self.left_status)
+        # 课题关联提示：导入时自动登记到工作台当前课题，这里显示关联结果
+        self.link_lbl = mk_label(left, "", size=8, width_px=280, wrap=True,
+                                 color=PAL["muted"])
+        ll.addWidget(self.link_lbl)
+
+        # 操作按钮 + 选项放进独立滚动区，左栏再窄也不会与 rail 抢空间
+        act_scroll = WorkScroll(left)
+        act_host = QWidget()
+        al = QVBoxLayout(act_host)
+        al.setContentsMargins(0, 0, 4, 0)
+        al.setSpacing(6)
+
+        # ---- 审阅层次：勾掉某层就整轮不跑该层（省时间、也便于只盯一层）
+        al.addWidget(mk_label(act_host, "本次审阅层次", size=9, bold=True,
+                              color=PAL["accent"], width_px=272))
+        self.layer_checks = {}
+        from manuscript_review.mr_review_layers import LAYERS as _MR_LAYERS
+        for k in ("omics", "stat", "shape"):
+            cb = QtWidgets.QCheckBox(f"{_MR_LAYERS[k]['name']}　"
+                                     f"{_MR_LAYERS[k]['sub'].split(' · ')[0]}")
+            cb.setChecked(True)
+            cb.setStyleSheet("QCheckBox { background:transparent; border:none; }")
+            self.layer_checks[k] = cb
+            al.addWidget(cb)
+
+        # ---- 自主落盘程度：审阅跑完自动写到什么程度，不需要人工再点落盘
+        al.addWidget(mk_label(act_host, "自主落盘（审阅完自动写入 Word）", size=9,
+                              bold=True, color=PAL["accent"], width_px=272))
+        self.autonomy_box = QtWidgets.QComboBox()
+        for key, label in (
+                ("revise", "批注 + 补写缺失报告项（推荐）"),
+                ("comment", "只挂批注，不改正文"),
+                ("report", "只出报告，不碰 Word")):
+            self.autonomy_box.addItem(label, key)
+        self.autonomy_box.setStyleSheet(
+            f"QComboBox {{ background:{PAL['surface2']}; color:{PAL['text']};"
+            f" border:1px solid {PAL['border']}; border-radius:7px;"
+            f" padding:4px 8px; font-size:9pt; }}")
+        self.autonomy_box.setFixedWidth(272)
+        self.autonomy_box.currentIndexChanged.connect(self._sync_auto_note)
+        al.addWidget(self.autonomy_box)
+        self.auto_note = mk_label(act_host, "", size=8, width_px=272, wrap=True,
+                                  color=PAL["muted"])
+        al.addWidget(self.auto_note)
+        self._sync_auto_note()
+
+        # 操作按钮：接在上面的滚动区里（act_host / al 已建好）
+        for text, cmd, primary in (
+                ("① 导入手稿（PDF / Word）", self.do_import, True),
+                ("② 确定性核验", lambda: self.run_act("signals"), False),
+                ("③ 语义审阅（LLM）", lambda: self.run_act("review"), False),
+                ("★ 一键审阅并自动落批注", self.run_all, True),
+                ("落回 Word（批注+修订）", lambda: self.run_act("apply"), False),
+                ("选择审稿批注版…", self.choose_annotated, False),
+                ("并入批注版（线程回复）", lambda: self.run_act("apply"), False),
+                ("生成审阅报告", lambda: self.run_act("report"), False),
+                ("打开修订稿", self.open_docx, False),
+                ("打开审阅报告", self.open_report, False),
+                ("载入历史审阅", self.load_history, False)):
+            b = CButton(master=act_host, text=text, width=272, height=30,
+                        font_family=UI_FONT, font_size=9, command=cmd,
+                        background_color=PAL["accent"] if primary else PAL["btn"],
+                        text_color=PAL["on_accent"] if primary else PAL["text"],
+                        hover_color=(PAL["accent_hover"] if primary
+                                     else PAL["btn_hover"]),
+                        border_color=None if primary else PAL["border"])
+            b.setFixedWidth(272)
+            al.addWidget(b)
+        al.addStretch(1)
+        act_scroll.setWidget(act_host)
+        ll.addWidget(act_scroll, 1)
+        ll.addWidget(CButton(master=left, text="返回工作台", width=280, height=30,
+                             font_family=UI_FONT, font_size=9,
+                             command=win.show_workspace,
+                             background_color=PAL["btn"], text_color=PAL["text"],
+                             hover_color=PAL["btn_hover"], border_color=PAL["border"]))
+        blay.addWidget(left)
+
+        # ---------------- 中栏：选中层的缺陷明细
+        center = Card(win, margin=(18, 14, 18, 14), spacing=8)
+        self.center = center
+        cl = center.layout()
+        self.head = mk_label(center, "手稿审阅", size=15, bold=True,
+                             color=PAL["accent"], width_px=330, wrap=False)
+        cl.addWidget(self.head)
+        self.spec = mk_label(center, "", size=9, color=PAL["muted"], width_px=330,
+                             wrap=False)
+        cl.addWidget(self.spec)
+        self.goal = mk_label(center, "", size=10, width_px=560, wrap=True,
+                             color=PAL["text"], bg=PAL["surface2"], radius=8, min_h=44)
+        cl.addWidget(self.goal)
+        self.detail = WorkScroll(center)
+        self.detail_host = QWidget()
+        self.detail_lay = QVBoxLayout(self.detail_host)
+        self.detail_lay.setContentsMargins(2, 2, 6, 2)
+        self.detail_lay.setSpacing(3)
+        self.detail.setWidget(self.detail_host)
+        cl.addWidget(self.detail, 1)
+        blay.addWidget(center, 1)
+
+        # ---------------- 右栏：统计 / 缺陷总览 / 流水
+        side = Card(win, margin=(16, 14, 16, 14), spacing=8)
+        self.side = side
+        side.setFixedWidth(384 + 2 * CARD_PAD)
+        rl = side.layout()
+        rl.addWidget(mk_label(side, "审阅统计与执行", size=12, bold=True,
+                              color=PAL["accent"], width_px=340))
+        self.prog = ProgressBar(side, width=344, height=8)
+        rl.addWidget(self.prog)
+        self.prog_lbl = mk_label(side, "尚未审阅", size=9, width_px=340,
+                                 color=PAL["muted"])
+        rl.addWidget(self.prog_lbl)
+        self.tally = mk_label(side, "", size=9, width_px=340, color=PAL["text"],
+                              bg=PAL["surface2"], radius=8, min_h=52)
+        rl.addWidget(self.tally)
+        rl.addWidget(mk_label(side, "缺陷总览（按严重度）", size=10, bold=True,
+                              color=PAL["accent"], width_px=340))
+        self.def_scroll = WorkScroll(side)
+        self.def_host = QWidget()
+        self.def_lay = QVBoxLayout(self.def_host)
+        self.def_lay.setContentsMargins(0, 0, 4, 0)
+        self.def_lay.setSpacing(2)
+        self.def_scroll.setWidget(self.def_host)
+        rl.addWidget(self.def_scroll, 1)
+        rl.addWidget(mk_label(side, "执行流水", size=10, bold=True,
+                              color=PAL["accent"], width_px=340))
+        self.mr_transcript = TranscriptView(side)
+        self.mr_transcript.setMinimumHeight(150)
+        rl.addWidget(self.mr_transcript, 1)
+        blay.addWidget(side)
+
+        self.thread = None
+        self._tick_timer = None
+        self._busy_t0 = 0.0
+        self._phase_label = ""
+        self._set_status("尚未导入手稿　·　请先点「① 导入手稿」", "muted")
+        self._update_footer_state()
+        self._welcome()
+
+    # ---------------------------------------------------------------- 数据
+    @staticmethod
+    def _rail_items() -> list:
+        """把三层架构映射成 StageRail 的环节（id / title / spec）。"""
+        from manuscript_review.mr_review_layers import LAYERS, LAYER_ORDER, stats
+        st = stats()
+        out = []
+        for k in LAYER_ORDER:
+            L = LAYERS[k]
+            out.append({"id": k, "title": f"{L['icon']} {L['name']}",
+                        "spec": f"{L['sub']}　·　{st[k]['total']} 条"
+                                f"（关键 {st[k]['关键']}）"})
+        return out
+
+    @property
+    def proj(self):
+        return getattr(self.win, "mr_project", None)
+
+    def section(self) -> dict:
+        return self.data[max(0, min(len(self.data) - 1, self.cur))]
+
+    def pick(self, idx: int):
+        self.cur = idx
+        self.refresh()
+
+    # ---------------------------------------------------------------- 选项
+    def selected_layers(self) -> list:
+        """勾选的审阅层次；全勾掉则返回全部（避免一轮都不跑）。"""
+        picked = [k for k, cb in getattr(self, "layer_checks", {}).items()
+                  if cb.isChecked()]
+        return picked or ["omics", "stat", "shape"]
+
+    def autonomy(self) -> str:
+        box = getattr(self, "autonomy_box", None)
+        return (box.currentData() if box is not None else "revise") or "revise"
+
+    def _sync_auto_note(self):
+        """说明当前自主落盘档位具体会做什么（写清副作用，避免意外改动稿件）。"""
+        key = self.autonomy()
+        txt = {
+            "revise": "审阅完成后自动：① 每条发现写一条 Word 批注；"
+                      "② 缺失的报告项用 Track Changes 绿色补写占位段。",
+            "comment": "审阅完成后自动：只把发现写成 Word 批注，"
+                       "不增删任何正文（适合结构还在调整的阶段）。",
+            "report": "审阅完成后自动：只生成审阅报告（Markdown/HTML/CSV），"
+                      "完全不碰 Word。",
+        }.get(key, "")
+        if getattr(self.win, "mr_merge_into", ""):
+            txt += "　当前已选「审稿批注版」：匹配得上的发现会做成线程回复。"
+        note = getattr(self, "auto_note", None)
+        if note is not None:
+            note.label().setText(txt)
+
+    # ---------------------------------------------------------------- 执行
+    def _log(self, text: str, tone: str = "text"):
+        self.mr_transcript.add_text_block(text + "\n", tone)
+
+    # ---------------------------------------------------------------- 忙碌可视化
+    def _set_status(self, text: str, tone: str = "muted", bold: bool = False):
+        """写左栏状态行，并按语气着色。
+
+        注意：left_status 是 ui_kit 的 RefitLabel（自适应高度标签），
+        真正能干活的 QLabel 要通过 .label() 拿 —— 直接把 RefitLabel 当 QLabel 用
+        会抛 AttributeError（例如它没有 setStyleSheet），
+        而这个异常发生在 Qt 信号回调里会被吞掉，表现为「点了没反应」。
+        """
+        col = PAL.get(tone, PAL["text"])
+        lbl = self.left_status.label() if hasattr(self.left_status, "label") \
+            else self.left_status
+        lbl.setText(text)
+        lbl.setStyleSheet(
+            f"QLabel {{ background:transparent; color:{col};"
+            f" font-weight:{700 if bold else 400}; }}")
+        if hasattr(self.left_status, "fit_now"):
+            try:
+                self.left_status.fit_now()
+            except Exception:                                      # noqa: BLE001
+                pass
+
+    def _set_busy_indicator(self, busy: bool, label: str = ""):
+        """把自己接到工作台底部那个显眼的 BusyIndicator 上。
+
+        原来审阅页只改了按钮可用性 + 一行灰色小字，底部动画区仍然显示「等待输入实验设计」，
+        看着像没在干活。现在审阅期间底部会显示橙色胶囊 + 均衡器律动 + 计时。
+        """
+        win = self.win
+        if not hasattr(win, "busy"):
+            return
+        if busy:
+            win.busy.start(label or "手稿审阅中")
+        else:
+            win.busy.stop(win._idle_hint() if hasattr(win, "_idle_hint") else "就绪")
+
+    def _busy(self, on: bool, label: str = ""):
+        """统一的忙碌/空闲切换：按钮、状态行、底部动画、计时器一起动。"""
+        for b in self.left.findChildren(CButton):
+            b.setEnabled(not on)
+        idx = self.win.body_stack.currentIndex() if hasattr(self.win, "body_stack") else -1
+        for k, b in getattr(self.win, "foot_btns", {}).items():
+            if k == "continue":
+                b.setEnabled(not on)
+        if on:
+            self._busy_t0 = time.time()
+            self._phase_label = label or "审阅进行中"
+            self._set_status(f"⏳ {self._phase_label}…　已 0 秒　（请稍候，不要关闭窗口）",
+                             "accent", bold=True)
+            self._set_busy_indicator(True, self._phase_label)
+            if not getattr(self, "_tick_timer", None):
+                self._tick_timer = QtCore.QTimer(self.body)
+                self._tick_timer.setInterval(1000)
+                self._tick_timer.timeout.connect(self._tick_busy)
+            self._tick_timer.start()
+            self._update_footer_state()
+        else:
+            self._phase_label = ""
+            if getattr(self, "_tick_timer", None):
+                self._tick_timer.stop()
+            self._set_busy_indicator(False)
+            self._set_status(self._idle_status_text())
+            self._update_footer_state()
+
+    def _tick_busy(self):
+        """每秒刷新一次「已 N 秒」，让用户确信程序还在跑、没有卡死。"""
+        el = int(time.time() - getattr(self, "_busy_t0", time.time()))
+        self._set_status(
+            f"⏳ {getattr(self, '_phase_label', '审阅进行中')}…　已 {el} 秒"
+            f"　（请稍候，不要关闭窗口）", "accent", bold=True)
+
+    def _idle_status_text(self) -> str:
+        p = self.proj
+        if p is None:
+            return "尚未导入手稿　·　请先点「① 导入手稿」"
+        from manuscript_review.mr_review_layers import LAYERS
+        counts = {}
+        for d in (p.defects or []):
+            counts[d.get("layer")] = counts.get(d.get("layer"), 0) + 1
+        total = len(p.defects or [])
+        keys = sum(1 for d in (p.defects or []) if d.get("severity") == "关键")
+        parts = "　".join(f"{LAYERS[k]['name']} {counts.get(k, 0)}"
+                          for k in ("omics", "stat", "shape"))
+        return f"缺陷 {total} 条（关键 {keys}）　·　{parts}"
+
+    def _update_footer_state(self):
+        """页脚「继续」按钮：**按当前所在视图**决定文案与动作（视图感知）。
+
+        为什么必须视图感知：页脚按钮是全局的，但工作台与手稿审阅的"下一步"完全不同。
+        早先它只按手稿审阅的进度写文案，结果是「停在工作台却显示『② 跑核验』」——
+        用户点下去会对手稿动手，跟他眼前看到的东西对不上。
+        """
+        b = getattr(self.win, "foot_btns", {}).get("continue")
+        if b is None:
+            return
+        idx = self.win.body_stack.currentIndex() if hasattr(self.win, "body_stack") else 0
+        if idx != 4:
+            # 工作台 / 统计 / Shape / 总览：用工作台自己的主流程文案
+            try:
+                txt = self.win._primary_label()
+            except Exception:                                      # noqa: BLE001
+                txt = "继续"
+            b.button().setText(txt)
+            b.button().setToolTip(f"推进工作台当前步骤（{txt}）；快捷键 Space")
+            b.setEnabled(True)
+            return
+        # 手稿审阅页
+        p = self.proj
+        if getattr(self, "_phase_label", ""):
+            b.button().setText("审阅中…")
+            b.setEnabled(False)
+            b.button().setToolTip("审阅正在进行，请等待当前任务结束")
+            return
+        if p is None:
+            b.button().setText("导入并开始")
+            b.button().setToolTip("选择手稿（PDF / Word）并开始审阅 —— 与左栏「① 导入手稿」"
+                         "同一个动作；导入后会自动登记到当前课题")
+        elif not (p.defects or p.signals):
+            b.button().setText("② 跑核验")
+            b.button().setToolTip("对手稿跑确定性核验（不联网、可复现）")
+        elif not (p.out_docx or (p.applied or {}).get("ok")):
+            b.button().setText("③ 写批注")
+            b.button().setToolTip("把发现写进 Word（批注 + 四色 Track Changes 修订）")
+        else:
+            b.button().setText("④ 出报告")
+            b.button().setToolTip("生成审阅报告（Markdown / HTML / CSV）")
+        b.setEnabled(True)
+
+    def footer_continue(self):
+        """页脚「继续」：按当前进度推进到下一步（导入 → 核验 → 语义审阅 → 落盘）。"""
+        if getattr(self, "_phase_label", ""):
+            self._log("审阅正在进行，请等待当前任务结束。", "warn")
+            return
+        p = self.proj
+        if p is None:
+            self.do_import()
+        elif not (p.defects or p.signals):
+            self.run_act("signals")
+        elif not (p.out_docx or (p.applied or {}).get("ok")):
+            self.run_act("apply")
+        else:
+            self.run_act("report")
+
+    def footer_save(self):
+        """页脚「保存」：把手稿审阅项目落盘（含缺陷与落盘结果）。"""
+        p = self.proj
+        if p is None:
+            self._log("还没有可保存的审阅项目：请先导入手稿。", "warn")
+            return
+        try:
+            path = p.save()
+            self._log(f"已保存审阅项目 → {os.path.basename(path)}", "ok")
+        except Exception as e:                                     # noqa: BLE001
+            self._log(f"保存失败：{e}", "bad")
+
+    def run_act_report(self):
+        self.run_act("report")
+
+    def run_act_apply(self):
+        self.run_act("apply")
+
+    def _start(self, act: str, path: str = "", skip_llm: bool = False,
+               mode: str = "dual"):
+        if self.thread is not None and self.thread.isRunning():
+            self._log("上一个任务还在运行，请稍候。", "warn")
+            return
+        need_llm = act in ("review", "all") and not skip_llm
+        if need_llm and not (self.win.cfg.get("api_key")):
+            self._log("未配置 LLM 密钥：本次只跑确定性核验（可证据化的硬缺陷照样能报）。",
+                      "warn")
+            skip_llm = True
+        # 需要「已有项目」的操作：signals/review/report/apply 必须导过稿。
+        # 但 all（一键审阅全流程）自带导入，只要给了路径就能从零跑完 ——
+        # 早先这里把 all 也一起挡掉，导致首次点「一键审阅全流程」毫无反应。
+        if act in ("signals", "review", "report", "apply") and self.proj is None:
+            self._log("请先点「① 导入手稿（PDF / Word）」。", "warn")
+            return
+        if act == "all" and self.proj is None and not path:
+            # 一键流程自带导入：这里直接让用户选文件，选完就走完整流程
+            self._log("一键审阅：请选择要审阅的手稿（选完会自动跑完整流程）。", "accent")
+            picked, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self.win, "选择要审阅的手稿（PDF 或 Word）", "",
+                "手稿文件 (*.pdf *.docx);;PDF (*.pdf);;Word (*.docx);;所有文件 (*)")
+            if not picked:
+                self._log("已取消，未选择手稿。", "muted")
+                return
+            path = picked
+        self._busy(True, _MR_ACT_LABEL.get(act, "审阅进行中"))
+        self.mr_transcript.add_rule()
+        hdr = f"手稿审阅 · {act}"
+        if act == "all":
+            hdr += f"（自主落盘：{self.autonomy()}）"
+        self.mr_transcript.add_header(hdr, "agent", time.strftime("%H:%M"))
+        self.thread = ManuscriptWorker(
+            self.win, act, path=path,
+            layers=self.selected_layers(), skip_llm=skip_llm, mode=mode,
+            autonomy=self.autonomy())
+        self.thread.step.connect(self.on_step)
+        self.thread.batch.connect(self.on_batch)
+        self.thread.done.connect(self.on_done)
+        self.thread.failed.connect(self.on_failed)
+        self.thread.start()
+
+    def do_import(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self.win, "导入手稿（PDF 或 Word）", "",
+            "手稿文件 (*.pdf *.docx);;PDF (*.pdf);;Word (*.docx);;所有文件 (*)")
+        if path:
+            self._start("import", path=path)
+
+    def run_act(self, act: str):
+        self._start(act)
+
+    def choose_annotated(self):
+        """选一份「审稿批注版」手稿：我们的发现将以**线程回复**挂在审稿意见下面。
+
+        选中后会立刻探测它有几条审稿批注、谁写的，让用户确认选对了文件。
+        """
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self.win, "选择审稿批注版手稿（带审稿意见的 .docx）", "",
+            "Word 文档 (*.docx);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            from manuscript_review import mr_thread
+            info = mr_thread.probe(path)
+        except Exception as e:                                     # noqa: BLE001
+            self._log(f"探测批注版失败：{e}", "bad")
+            return
+        if not info.get("has_comments"):
+            r = QtWidgets.QMessageBox.question(
+                self.win, "这份稿件没有审稿批注",
+                f"{os.path.basename(path)}\n\n没有检测到任何批注。\n"
+                "继续的话，我们的发现会作为**独立批注**写在该文件上（不线程）。\n\n"
+                "是否仍使用它作为底板？")
+            if r != QtWidgets.QMessageBox.Yes:
+                return
+        self.win.mr_merge_into = os.path.abspath(path)
+        self._log(f"已选定并入底板：{os.path.basename(path)}"
+                  f"（审稿批注 {info.get('count', 0)} 条"
+                  f"｜作者：{'、'.join(info.get('authors') or ['—'])}）", "ok")
+        for c in (info.get("comments") or [])[:8]:
+            self._log(f"    #{c['id']} [{c['author']}] 段{c['para']} "
+                      f"{str(c['text'])[:60]}", "muted")
+        self._log("之后点「并入批注版（线程回复）」即可生成。", "muted")
+        self.refresh()
+
+    def run_all(self):
+        """一键审阅全流程：导入 → 核验 → 审阅 → **自主写入 Word** → 报告。
+
+        这就是「自主落盘」的主入口 —— 用户只需选一次文件，之后批注/修订/报告全部自动完成。
+        """
+        self._start("all")
+
+    def on_step(self, step: str, msg: str):
+        tone = {"import": "accent", "signals": "agent", "review": "agent",
+                "report": "ok", "apply": "ok"}.get(step, "text")
+        self._log(f"[{step}] {msg}", tone)
+
+    def on_batch(self, layer: str, batch: int, n: int, cached: bool, err: str):
+        tag = "缓存" if cached else "新请求"
+        line = f"　· {layer} 第 {batch} 批：缺陷 {n} 条（{tag}）"
+        if err:
+            line += f"　错误：{err[:90]}"
+        self._log(line, "warn" if err else "muted")
+        self.prog_lbl.label().setText(f"语义审阅中：{layer} 第 {batch} 批")
+
+    def on_done(self, ok: bool, msg: str):
+        self._busy(False)
+        self._log(("✓ " if ok else "✗ ") + msg, "ok" if ok else "bad")
+        self.refresh()
+        if not ok:
+            self._log("（上面已有细节；可据此调整后重试。）", "muted")
+
+    def on_failed(self, err: str):
+        self._busy(False)
+        self._log("!! 异常：\n" + err.splitlines()[0], "bad")
+        self._log(err, "muted")
+
+    # ---------------------------------------------------------------- 打开产物
+    def open_docx(self):
+        p = self.proj
+        target = (p.out_docx if p else "") or ((p.applied or {}).get("out_path")
+                                               if p else "")
+        self._open(target, "还没有修订稿：请先跑「一键审阅全流程」或「落回 Word」。")
+
+    def open_report(self):
+        p = self.proj
+        self._open(p.report_path if p else "",
+                   "还没有审阅报告：请先跑「生成审阅报告」。")
+
+    def _open(self, path: str, hint: str):
+        if path and os.path.exists(path):
+            try:
+                os.startfile(path)                                  # noqa: S606
+                self._log("已打开：" + path, "ok")
+            except Exception as e:                                 # noqa: BLE001
+                self._log(f"打开失败：{e}", "bad")
+        else:
+            self._log(hint, "warn")
+
+    def load_history(self):
+        from manuscript_review.mr_engine import ReviewProject
+        items = ReviewProject.list_all()
+        if not items:
+            self._log("还没有历史审阅项目。", "warn")
+            return
+        labels = [f"{x['name']} · 缺陷 {x['defects']} · {x['updated']}" for x in items]
+        sel, ok = QtWidgets.QInputDialog.getItem(self.win, "载入历史审阅",
+                                                 "选择项目：", labels, 0, False)
+        if not ok or not sel:
+            return
+        try:
+            self.win.mr_project = ReviewProject.load(items[labels.index(sel)]["path"])
+            self._log("已载入：" + self.win.mr_project.name, "ok")
+            self.refresh()
+        except Exception as e:                                     # noqa: BLE001
+            self._log(f"载入失败：{e}", "bad")
+
+    # ---------------------------------------------------------------- 渲染
+    def _welcome(self):
+        self.mr_transcript.add_header("手稿审阅 · 使用说明", "accent",
+                                      time.strftime("%H:%M"))
+        self.mr_transcript.add_text_block(
+            "用法：① 导入手稿（PDF 会先转成 DOCX 转换稿）\n"
+            "　　　② 确定性核验：不需要联网，报可证据化的硬缺陷\n"
+            "　　　　（没写 ICC、没给管电压、没报告校准、数据可向作者索取……）\n"
+            "　　　③ 语义审阅：LLM 判断摘要组件、Discussion 边界、结论强度等\n"
+            "　　　④ 落回 Word：每条缺陷一条原生批注，可采纳的修改做成四色修订\n"
+            "　　　　绿 00B050 新增 / 红 FF0000 删除 / 蓝 0070C0 修改 / 橙 ED7D31 移动\n"
+            "　　　⑤ 生成审阅报告（Markdown + HTML + CSV）\n\n"
+            "三层条目全部派生自本工作台已有的规范数据，"
+            "与「设计工作台 / Statistic / SCI Shape」三页同源。\n", "muted")
+
+    def refresh(self):
+        """按当前项目重画整个页面（左栏状态 + 中栏明细 + 右栏统计）。"""
+        from manuscript_review.mr_review_layers import LAYERS, stats
+        p = self.proj
+        st_total = stats()
+
+        # ---- 各层状态与缺陷数
+        states, counts, key_counts = {}, {}, {}
+        for s in self.data:
+            k = s["id"]
+            rows = [d for d in ((p.defects or []) if p else []) if d.get("layer") == k]
+            counts[k] = len(rows)
+            key_counts[k] = sum(1 for d in rows if d.get("severity") == "关键")
+            if p is None:
+                states[k] = "todo"
+            elif not (p.signals or p.defects):
+                states[k] = "todo"
+            elif rows:
+                states[k] = "drafted"          # 有缺陷 → 待处理
+            else:
+                states[k] = "done"             # 已审且未报缺陷
+        self.rail.set_states(states, self.cur)
+
+        # ---- 左栏状态行
+        if p is None:
+            self._set_status("尚未导入手稿　·　请先点「① 导入手稿」", "muted")
+        else:
+            self._set_status(self._idle_status_text(), "text")
+        self._render_link(p)
+        self._update_footer_state()
+
+        # ---- 标题 / 规格 / 目标
+        sec = self.section()
+        L = LAYERS[sec["id"]]
+        self.head.label().setText(f"{L['icon']} {L['name']}层　"
+                                  f"（缺陷 {counts[sec['id']]} 条"
+                                  f"· 关键 {key_counts[sec['id']]}）")
+        self.spec.label().setText(f"{L['sub']}　·　对照条目 {st_total[sec['id']]['total']} 条")
+        self.goal.label().setText(
+            "本层为什么重要：" + L["why"]
+            + (f"　当前手稿本章节：{'、'.join(L['sections'])}。" if p else ""))
+
+        self._render_detail()
+        self._render_defects()
+        self._render_stats()
+        self.refit_all()
+        QtCore.QTimer.singleShot(0, self.refit_all)
+
+    def _render_link(self, p):
+        """显示课题关联：这份手稿挂在哪个课题下、课题里已登记几份、背景是否已带入。"""
+        lbl = getattr(self, "link_lbl", None)
+        if lbl is None:
+            return
+        cur = getattr(self.win, "project", None)
+        cur_name = getattr(cur, "name", "") if cur is not None else ""
+        if p is None:
+            txt = (f"导入时自动登记为课题「{cur_name}」的手稿附件"
+                   if cur_name else "（无当前课题）")
+            color = PAL["muted"]
+        else:
+            bound = p.design_name or "（未关联）"
+            n = 0
+            if cur is not None and hasattr(cur, "manuscripts"):
+                n = len(cur.manuscripts or [])
+            same = bool(p.design_name) and p.design_name == cur_name
+            txt = f"已关联课题：{bound}"
+            if n:
+                txt += f"　·　该课题下 {n} 份手稿"
+            if p.design_digest:
+                txt += f"　·　背景 {len(p.design_digest)} 字已带入审阅"
+            if not same and cur_name:
+                txt += f"（注意：当前工作台是「{cur_name}」）"
+            color = PAL["ok"] if same else PAL["warn"]
+        lbl.label().setText(txt)
+        lbl.label().setStyleSheet(
+            f"QLabel {{ background:transparent; color:{color}; }}")
+
+    def _render_detail(self):
+        from manuscript_review.mr_review_layers import LAYERS
+        lay = self.detail_lay
+        clear_layout(lay)
+        p = self.proj
+        sec = self.section()
+        k = sec["id"]
+        L = LAYERS[k]
+
+        if p is None:
+            lay.addWidget(self._block_title("还没有导入手稿",
+                                            "支持 PDF（自动转 DOCX）与 .docx"))
+            for t in ("点左栏「① 导入手稿（PDF / Word）」选择稿件；",
+                      "PDF 会先转成 DOCX 转换稿，后续审阅与修订都作用于转换稿；",
+                      "导入后建议先跑「② 确定性核验」——不联网、可复现，"
+                      "能直接报出没写 ICC、没给扫描参数这类硬伤。"):
+                lay.addWidget(self._line("·　" + t))
+            lay.addWidget(self._block_title("三层架构的对照口径"))
+            for s in self.data:
+                sL = LAYERS[s["id"]]
+                lay.addWidget(mk_label(self.detail_host,
+                                       f"{sL['icon']} {sL['name']}　{sL['sub']}",
+                                       size=9, bold=True, width_px=560, wrap=True,
+                                       color=PAL["accent"]))
+                lay.addWidget(mk_label(self.detail_host, "　　" + sL["why"], size=9,
+                                       width_px=560, wrap=True, color=PAL["muted"]))
+            lay.addSpacing(10)
+            return
+
+        md = p.manuscript or {}
+        # ---- 手稿信息
+        lay.addWidget(self._block_title("手稿", os.path.basename(p.docx_path or "")))
+        info = [("原稿", os.path.basename(p.source_path or "")),
+                ("规模", f"{md.get('paragraphs', 0)} 段 · {md.get('word_count', 0)} 字"),
+                ("标题", md.get("title", "")),
+                ("缺陷", f"{len(p.defects or [])} 条")]
+        if p.converted:
+            info.insert(0, ("格式", "PDF → DOCX 转换稿（公式/复杂表格可能失真）"))
+        for a, b in info:
+            lay.addWidget(mk_label(self.detail_host, f"{a}：{b}", size=9, width_px=560,
+                                   wrap=True, color=PAL["text"]))
+        if p.outline:
+            lay.addWidget(self._block_title("章节映射", "段号即 Word 批注锚点"))
+            for o in p.outline:
+                lay.addWidget(mk_label(
+                    self.detail_host,
+                    f"{o['name']}　起于第 {o['start']} 段　·　{o['paragraphs']} 段　·　"
+                    f"{o['chars']} 字", size=9, width_px=560, wrap=True,
+                    color=PAL["muted"]))
+
+        # ---- 本层缺陷
+        rows = [d for d in (p.defects or []) if d.get("layer") == k]
+        lay.addWidget(self._block_title(f"{L['name']}层缺陷（{len(rows)} 条）",
+                                        "按严重度排序；来源标注确定性核验 / 语义审阅"))
+        if not rows:
+            lay.addWidget(self._line("本层未报出缺陷。"
+                                     + ("（若尚未跑审阅，请先点左栏 ② / ③）"
+                                        if not (p.signals or p.defects) else ""),
+                                     color=PAL["ok"]))
+        for i, d in enumerate(rows[:60], 1):
+            tone = MR_SEV_TONE.get(d.get("severity"), "muted")
+            lay.addWidget(mk_label(
+                self.detail_host,
+                f"{MR_SEV_MARK.get(d.get('severity'), '')} {i}. "
+                f"{d.get('title', '')}　｜　{d.get('ref', '')}"
+                + (f"｜{d.get('spec')}" if d.get("spec") else "")
+                + f"　·　段 {d.get('para_idx') or '-'}"
+                + ("　·　确定性核验" if d.get("source") == "signal" else "　·　语义审阅"),
+                size=9, bold=True, width_px=560, wrap=True, color=PAL[tone]))
+            if d.get("why"):
+                lay.addWidget(mk_label(self.detail_host, "　　缺陷：" + d["why"],
+                                       size=9, width_px=560, wrap=True,
+                                       color=PAL["text"]))
+            if d.get("evidence"):
+                lay.addWidget(mk_label(self.detail_host,
+                                       "　　证据：" + str(d["evidence"])[:200],
+                                       size=8, width_px=560, wrap=True,
+                                       color=PAL["muted"]))
+            if d.get("suggestion"):
+                lay.addWidget(mk_label(self.detail_host,
+                                       "　　建议：" + str(d["suggestion"])[:300],
+                                       size=9, width_px=560, wrap=True,
+                                       color=PAL["ok"]))
+        if len(rows) > 60:
+            lay.addWidget(self._line(f"（另有 {len(rows) - 60} 条，见审阅报告或右栏总览）",
+                                     color=PAL["muted"]))
+
+        # ---- 本层确定性核验明细
+        sigs = [h for h in (p.signals or [])
+                if _mr_signal_layer(h.get("signal")) == k and h.get("verdict") != "reported"]
+        if sigs:
+            from manuscript_review import mr_signals
+            lay.addWidget(self._block_title(
+                f"{L['name']}层确定性核验明细（{len(sigs)} 项待处理）",
+                "已报告且合格的项不在此列出"))
+            for h in sigs:
+                v = "缺失" if h.get("verdict") == "missing" else "不完整"
+                tone = "bad" if v == "缺失" else "warn"
+                lay.addWidget(mk_label(
+                    self.detail_host,
+                    f"{'■' if v == '缺失' else '▲'} {v}　"
+                    f"{mr_signals.label_of(h.get('signal', ''))}"
+                    f"　（段 {h.get('para_idx') or '-'}）",
+                    size=9, bold=True, width_px=560, wrap=True, color=PAL[tone]))
+                if h.get("evidence"):
+                    lay.addWidget(mk_label(self.detail_host,
+                                           "　　命中：" + str(h["evidence"])[:160],
+                                           size=8, width_px=560, wrap=True,
+                                           color=PAL["muted"]))
+                if h.get("note"):
+                    lay.addWidget(mk_label(self.detail_host, "　　要求：" + h["note"],
+                                           size=8, width_px=560, wrap=True,
+                                           color=PAL["muted"]))
+        if p.warnings:
+            lay.addWidget(self._block_title("提示"))
+            for w in p.warnings:
+                lay.addWidget(self._line("·　" + w, color=PAL["warn"]))
+        lay.addSpacing(10)
+
+    def _render_defects(self):
+        lay = self.def_lay
+        clear_layout(lay)
+        p = self.proj
+        rows = sorted((p.defects or []) if p else [],
+                      key=lambda d: ({"关键": 0, "主要": 1, "一般": 2}.get(
+                          d.get("severity"), 9), d.get("layer") or "",
+                          d.get("para_idx") or 0))
+        if not rows:
+            lay.addWidget(mk_label(self.def_host, "（暂无缺陷）", size=9,
+                                   width_px=300, wrap=True, color=PAL["muted"]))
+            lay.addStretch(1)
+            return
+        show = 0
+        for d in rows:
+            if show >= 90:
+                break
+            show += 1
+            tone = MR_SEV_TONE.get(d.get("severity"), "muted")
+            lay.addWidget(mk_label(
+                self.def_host,
+                f"{MR_SEV_MARK.get(d.get('severity'), '')} {d.get('title', '')[:34]}",
+                size=9, bold=True, width_px=300, wrap=True, color=PAL[tone]))
+            lay.addWidget(mk_label(
+                self.def_host,
+                f"　　{d.get('layer', '')} · 段 {d.get('para_idx') or '-'} · "
+                f"{'核验' if d.get('source') == 'signal' else '语义'}",
+                size=8, width_px=300, wrap=False, color=PAL["muted"]))
+        if len(rows) > show:
+            lay.addWidget(mk_label(self.def_host,
+                                   f"（另有 {len(rows) - show} 条，见审阅报告）",
+                                   size=8, width_px=300, wrap=True, color=PAL["muted"]))
+        lay.addStretch(1)
+
+    def _render_stats(self):
+        from manuscript_review.mr_reviewer import summarize as mr_summarize
+        p = self.proj
+        if p is None:
+            self.prog.set_value(0.0)
+            self.prog_lbl.label().setText("尚未导入手稿")
+            self.tally.label().setText("导入后这里会显示三层的缺陷构成。")
+            return
+        s = p.summary or mr_summarize(p.defects or [])
+        total = s.get("total", 0)
+        done = 0
+        for sec in self.data:
+            if not [d for d in (p.defects or []) if d.get("layer") == sec["id"]]:
+                done += 1
+        self.prog.set_value(done / len(self.data) if self.data else 0.0)
+        sig = p.signal_summary or {}
+        self.prog_lbl.label().setText(
+            f"缺陷 {total} 条 · 关键 {s.get('关键', 0)} · 主要 {s.get('主要', 0)}"
+            f" · 一般 {s.get('一般', 0)}")
+        by = s.get("by_layer") or {}
+        parts = []
+        for sec in self.data:
+            d = by.get(sec["id"]) or {}
+            parts.append(f"{sec['title'].split(' ', 1)[-1]} {d.get('total', 0)}"
+                         f"（关键 {d.get('关键', 0)}）")
+        self.tally.label().setText(
+            "　".join(parts)
+            + (f"\n确定性核验 {sig.get('total', 0)} 项：缺失 {sig.get('missing', 0)} · "
+               f"不完整 {sig.get('weak', 0)} · 已报告 {sig.get('reported', 0)}"
+               if sig else "")
+            + (f"\n落盘：批注 {(p.applied or {}).get('comments_added', 0)} 条 · "
+               f"修订 {(p.applied or {}).get('revisions_added', 0)} 处"
+               if p.applied else ""))
+
+    # ---------------------------------------------------------------- 小工具
+    def _block_title(self, text: str, sub: str = ""):
+        wrap = QWidget(self.detail_host)
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(0, 10, 0, 2)
+        wl.setSpacing(1)
+        wl.addWidget(mk_label(wrap, text, size=11, bold=True, width_px=560,
+                              wrap=False, color=PAL["accent"]))
+        if sub:
+            wl.addWidget(mk_label(wrap, sub, size=8, width_px=560, wrap=False,
+                                  color=PAL["muted"]))
+        return wrap
+
+    def _line(self, text: str, color=None, bold: bool = False, size: int = 9):
+        return mk_label(self.detail_host, text, size=size, bold=bold, width_px=560,
+                        wrap=True, color=color or PAL["text"])
+
+    def refit_all(self):
+        for lbl in self.body.findChildren(RefitLabel):
+            try:
+                lbl.fit_now()
+            except Exception:                                      # noqa: BLE001
+                pass
+
+
+def _mr_signal_layer(name: str) -> str:
+    """信号 → 层归属（与 mr_signals 内部映射保持一致的查询入口）。"""
+    try:
+        from manuscript_review import mr_signals
+        return mr_signals._layer_of(name or "")
+    except Exception:                                              # noqa: BLE001
+        return ""
+
+
 # --------------------------------------------------------------------------- 设置弹窗
 class SettingsDialog(CTopLevel):
     saved = Signal(dict)
@@ -1378,12 +2415,16 @@ class StudioWindow(CMainWindow):
         blay.addWidget(self._build_center(), 1)
         blay.addWidget(self._build_right())
 
-        # 工作台 / Statistic / SCI Shape / 总览 四个视图共存于同一窗口，按钮切换
+        # 工作台 / Statistic / SCI Shape / 总览 / 手稿审阅 五个视图共存于同一窗口
+        self.mr_project = None
+        self.mr_merge_into = ""        # 选定的「审稿批注版」底板（空 = 不并入）
+        self.mr_reply_mode = "reply"   # reply = 线程回复；standalone = 只做独立批注
         self.body_stack = QtWidgets.QStackedWidget(self)
         self.body_stack.addWidget(body)                        # 0 工作台
         self.body_stack.addWidget(self._build_stat_page())      # 1 Statistic
         self.body_stack.addWidget(self._build_shape_page())     # 2 SCI Shape
         self.body_stack.addWidget(self._build_overview())       # 3 总览
+        self.body_stack.addWidget(self._build_mr_page())        # 4 手稿审阅
         root.addWidget(self.body_stack, 1)
 
         root.addWidget(self._build_footer())
@@ -1411,6 +2452,16 @@ class StudioWindow(CMainWindow):
         self.shape_page = ShapeScopePage(self)
         return self.shape_page.body
 
+    def _build_mr_page(self) -> QWidget:
+        self.mr_page = ManuscriptReviewPage(self)
+        return self.mr_page.body
+
+    def show_mr(self):
+        self.mr_page.refresh()
+        self.body_stack.setCurrentIndex(4)
+        self._sync_flow(4)
+        self._view = "mr"
+
     def show_stat(self):
         self.stat_page.refresh()
         self.body_stack.setCurrentIndex(1)
@@ -1424,7 +2475,7 @@ class StudioWindow(CMainWindow):
         self._view = "shape"
 
     def _build_flow(self) -> Card:
-        """流程条：把四个视图按先后顺序做成三维键帽（设计 → 统计 → 结构 → 总览）。"""
+        """流程条：把五个视图按先后顺序做成三维键帽（设计 → 统计 → 结构 → 总览 → 手稿审阅）。"""
         card = Card(self, margin=(16, 7, 16, 7), spacing=0)
         self.flow_card = card
         self.flow = FlowStepper(card, [
@@ -1432,6 +2483,7 @@ class StudioWindow(CMainWindow):
             {"title": "统计 Statistic", "sub": "九阶段计算与归纳"},
             {"title": "SCI 结构 Shape", "sub": "七章 scope 自评"},
             {"title": "总览 Overview", "sub": "评分与检查表"},
+            {"title": "手稿审阅", "sub": "三层对照 + Word 修订"},
         ], height=42)
         self.flow.stepClicked.connect(self.goto_step)
         card.layout().addWidget(self.flow)
@@ -1440,8 +2492,19 @@ class StudioWindow(CMainWindow):
     def goto_step(self, idx: int):
         """点击流程条上的步骤 → 跳到对应视图。"""
         steps = (self.show_workspace, self.show_stat, self.show_sci_shape,
-                 self.show_overview)
+                 self.show_overview, self.show_mr)
         steps[max(0, min(len(steps) - 1, idx))]()
+        # 页脚「继续」按钮是全局的，切视图后必须按新视图重算文案
+        self._sync_footer_state()
+
+    def _sync_footer_state(self):
+        """按当前视图刷新页脚「继续」按钮（工作台与手稿审阅的下一步并不相同）。"""
+        page = getattr(self, "mr_page", None)
+        if page is not None and hasattr(page, "_update_footer_state"):
+            try:
+                page._update_footer_state()
+            except Exception:                                      # noqa: BLE001
+                pass
 
     def _sync_flow(self, idx: int):
         """同步流程条：当前步骤抬起，之前的步骤打勾，并把各视图进度挂成角标。"""
@@ -1466,6 +2529,17 @@ class StudioWindow(CMainWindow):
                      if isinstance(c.get("readiness"), int)]
             if ready:
                 self.flow.set_badge(3, f"就绪 {sum(ready) // len(ready)}%")
+            # 手稿审阅角标：导入后显示缺陷数（关键单独标出）
+            mp = getattr(self, "mr_project", None)
+            if mp is not None and (mp.defects or mp.signals):
+                n = len(mp.defects or [])
+                k = sum(1 for d in (mp.defects or [])
+                        if d.get("severity") == "关键")
+                self.flow.set_badge(4, f"缺陷 {n}·关键 {k}")
+            elif mp is not None:
+                self.flow.set_badge(4, "已导入待审")
+            else:
+                self.flow.set_badge(4, "未导入")
         except Exception:                                       # noqa: BLE001
             pass
 
@@ -2052,13 +3126,63 @@ class StudioWindow(CMainWindow):
         wrap.setFixedSize(160, 28)
         wl.addWidget(self.progress, 0, Qt.AlignVCenter)
         lay.addWidget(wrap)
-        # 提示文字固定单行：不给它换行机会，就永远不会超出 38px 的状态栏
-        self.tip = mk_label(f, "Space 继续 · Ctrl+S 保存 · Ctrl+E 导出 · ⇧E 出 Word",
-                            size=9, align="right", width_px=260, wrap=False,
-                            color=PAL["muted"])
-        self.tip.setFixedWidth(280)
-        lay.addWidget(self.tip)
+        # 右下角：原来是「Space 继续 · Ctrl+S 保存 · Ctrl+E 导出」这类**纯文字提示**，
+        # 用户看不出来能点，也不知道该敲哪个键。现在全部做成真按钮，
+        # 按钮上直接带快捷键角标，点与按都行。
+        self.foot_btns = {}
+        for key, text, tip, cmd, primary, w in (
+                ("continue", "继续 ␣", "继续 / 推进到下一步（快捷键 Space）",
+                 self.footer_continue, True, 96),
+                ("save", "保存 ⌃S", "保存当前项目（快捷键 Ctrl+S）",
+                 self.footer_save, False, 96),
+                ("export", "导出 ⌃E", "导出 Markdown / Word（Ctrl+E / Ctrl+Shift+E）",
+                 self.footer_export, False, 96)):
+            b = CButton(master=f, text=text, width=w, height=28,
+                        font_family=UI_FONT, font_size=9, command=cmd,
+                        background_color=PAL["accent"] if primary else PAL["btn"],
+                        text_color=PAL["on_accent"] if primary else PAL["text"],
+                        hover_color=(PAL["accent_hover"] if primary else PAL["btn_hover"]),
+                        border_color=None if primary else PAL["border"])
+            b.setFixedWidth(w)
+            b.button().setToolTip(tip)
+            self.foot_btns[key] = b
+            lay.addWidget(b)
         return f
+
+    # ---------------------------------------------------------------- 底部按钮动作
+    def footer_continue(self):
+        """右下角「继续」：按当前所在视图推进——手稿审阅页走审阅流程，其余走工作台主流程。"""
+        idx = self.body_stack.currentIndex() if hasattr(self, "body_stack") else 0
+        if idx == 4 and hasattr(self, "mr_page"):
+            self.mr_page.footer_continue()
+        else:
+            self.primary_action()
+
+    def footer_save(self):
+        """右下角「保存」：手稿审阅页保存审阅项目，其余保存设计项目。"""
+        idx = self.body_stack.currentIndex() if hasattr(self, "body_stack") else 0
+        if idx == 4 and hasattr(self, "mr_page"):
+            self.mr_page.footer_save()
+        else:
+            self.save_project()
+
+    def footer_export(self):
+        """右下角「导出」：弹一个小菜单，按当前视图给出可用的导出项。"""
+        idx = self.body_stack.currentIndex() if hasattr(self, "body_stack") else 0
+        m = QtWidgets.QMenu(self)
+        if idx == 4 and hasattr(self, "mr_page"):
+            m.addAction("审阅报告（Markdown + HTML + CSV）",
+                        self.mr_page.run_act_report)
+            m.addAction("修订稿 Word（批注 + 四色修订）",
+                        self.mr_page.run_act_apply)
+            m.addSeparator()
+            m.addAction("打开修订稿", self.mr_page.open_docx)
+            m.addAction("打开审阅报告", self.mr_page.open_report)
+        else:
+            m.addAction("导出 Markdown（Ctrl+E）", self.export_md)
+            m.addAction("导出 Word（Ctrl+Shift+E）", self.export_docx)
+        m.exec(self.foot_btns["export"].mapToGlobal(
+            QtCore.QPoint(0, self.foot_btns["export"].height())))
 
     # ---------------------------------------------------------------- 欢迎与文档
     def _welcome(self):
@@ -2098,7 +3222,9 @@ class StudioWindow(CMainWindow):
             self.btn_go.set_idle_text(self._primary_label())
         if hasattr(self, "body_stack"):
             idx = self.body_stack.currentIndex()
-            if idx == 3:
+            if idx == 4:
+                self.mr_page.refresh()
+            elif idx == 3:
                 self.refresh_overview()
             elif idx == 2:
                 self.shape_page.refresh()
@@ -2221,6 +3347,59 @@ class StudioWindow(CMainWindow):
             self.show_raw_input()
         self._refresh_all()
         self._toast(f"当前项目：{project.name}")
+        # 双向联动（课题 → 手稿）：切到哪个课题，就自动切到它绑定的手稿审阅
+        self._sync_mr_to_project(project, announce=announce)
+
+    # ---------------------------------------------------------------- 课题 ⇄ 手稿联动
+    def _sync_mr_to_project(self, project, announce: bool = True) -> None:
+        """把「手稿审阅」视图切到该课题绑定的手稿上（双向联动的课题 → 手稿方向）。
+
+        规则：
+            · 课题有绑定手稿 → 载入**最近一次**登记的那份审阅项目
+            · 课题没有绑定 → 清空审阅视图，避免把上一个课题的手稿挂在本题下
+            · 切换前先把当前审阅项目落盘，免得丢掉刚跑的结论
+        失败只提示、不抛异常 —— 课题切换本身不该被手稿问题阻断。
+        """
+        page = getattr(self, "mr_page", None)
+        if page is None:
+            return
+        recs = list(getattr(project, "manuscripts", None) or [])
+        if not recs:
+            # 本题没有手稿：清空审阅视图（避免残留上一个课题的手稿）
+            if getattr(self, "mr_project", None) is not None:
+                try:
+                    self.mr_project.save()
+                except Exception:                                  # noqa: BLE001
+                    pass
+                self.mr_project = None
+                page._log(f"课题「{project.name}」没有绑定的手稿，"
+                          f"审阅视图已清空。", "muted")
+                page.refresh()
+            return
+        rec = recs[-1]
+        path = rec.get("project_path") or ""
+        if not path or not os.path.exists(path):
+            page._log(f"课题「{project.name}」登记的审阅项目文件已不存在："
+                      f"{os.path.basename(path) or '（空路径）'}", "warn")
+            return
+        if getattr(self, "mr_project", None) is not None and \
+                os.path.abspath(self.mr_project.path()) == os.path.abspath(path):
+            return                                  # 已经是这份，无需切换
+        try:
+            from manuscript_review.mr_engine import ReviewProject
+            if getattr(self, "mr_project", None) is not None:
+                self.mr_project.save()              # 先保住当前这份的改动
+            self.mr_project = ReviewProject.load(path)
+            # 课题背景可能已更新，顺手刷新快照并同步关联名
+            self.mr_project.design_name = project.name
+            self.mr_project.design_path = project.path
+            page._log(f"已随课题切到绑定的手稿「{self.mr_project.name}」"
+                      f"（缺陷 {len(self.mr_project.defects or [])} 条）", "ok")
+            page.refresh()
+            if announce:
+                self._toast(f"已同步手稿：{self.mr_project.name}")
+        except Exception as e:                                     # noqa: BLE001
+            page._log(f"载入课题绑定手稿失败：{type(e).__name__}: {e}", "bad")
 
     def manage_projects(self):
         dlg = ProjectManagerDialog(self, self.project.path if self.project.exists_on_disk() else "")
@@ -2332,7 +3511,7 @@ class StudioWindow(CMainWindow):
 
     def save_project(self):
         p = self._flush_project()
-        self.tip.label().setText(f"已保存 → {os.path.basename(p)}")
+        self._toast(f"已保存 → {os.path.basename(p)}")
 
     def closeEvent(self, event):
         try:
@@ -2406,7 +3585,9 @@ class StudioWindow(CMainWindow):
                     pass
         if hasattr(self, "body_stack"):
             idx = self.body_stack.currentIndex()
-            if idx == 3:
+            if idx == 4:
+                self.mr_page.refresh()
+            elif idx == 3:
                 self.refresh_overview()
             elif idx == 2:
                 self.shape_page.refresh()
@@ -2935,17 +4116,10 @@ class StudioWindow(CMainWindow):
             wdg = getattr(self, name, None)
             if wdg is not None:
                 wdg.setFixedWidth(wd)
-        # 页脚提示按可用宽度切换长短，避免单行文字放不下（单行标签不会换行）
-        if hasattr(self, "tip"):
-            if w < 1420:
-                self.tip.setFixedWidth(196)
-                self.tip.label().setText("Space 继续 · Ctrl+S 保存")
-            elif w < 1700:
-                self.tip.setFixedWidth(246)
-                self.tip.label().setText("Space 继续 · Ctrl+S 保存 · Ctrl+E 导出")
-            else:
-                self.tip.setFixedWidth(300)
-                self.tip.label().setText("Space 继续 · Ctrl+S 保存 · Ctrl+E 导出 · ⇧E 出 Word")
+        # 页脚右侧三个按钮按可用宽度决定是否显示文字说明（窄窗口保留按钮本身）
+        if hasattr(self, "foot_btns"):
+            for k, b in self.foot_btns.items():
+                b.setFixedWidth(84 if narrow else 96)
         if narrow != getattr(self, "_narrow", None):
             self._narrow = narrow
             self._refresh_doc()                 # 元信息文案随宽度切换，避免换行被截
@@ -3089,7 +4263,16 @@ class StudioWindow(CMainWindow):
             self._toast(f"打开失败：{e}")
 
     def _toast(self, text: str):
-        self.tip.label().setText(text)
+        """右下角原提示标签已改成按钮，提示改走状态栏；
+        若当前在手稿审阅页，同时写进该页的执行流水，避免提示丢失。"""
+        if hasattr(self, "status"):
+            self.status.label().setText(text)
+        idx = self.body_stack.currentIndex() if hasattr(self, "body_stack") else -1
+        if idx == 4 and hasattr(self, "mr_page"):
+            try:
+                self.mr_page._log(text, "muted")
+            except Exception:                                      # noqa: BLE001
+                pass
 
     # ---------------------------------------------------------------- 键盘
     def keyPressEvent(self, event):
@@ -3297,4 +4480,35 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    # 启动失败必须看得见：预检 + 异常兜底。
+    # 起因：直接用 PATH 里的 python（本机是 miniconda base，没有 PySide6）运行，
+    # 只抛一条 ModuleNotFoundError 就结束，双击/无控制台时表现为「一闪就没」。
+    # 解释器自举在文件顶部已经处理了 PySide6 缺失的情况；
+    # 这里再兜住其它任何启动期异常，并在异常时留住控制台。
+    import traceback as _tb
+
+    def _die(title: str, detail: str, code: int = 1) -> None:
+        sys.stderr.write("\n" + "=" * 62 + f"\n[启动失败] {title}\n" + "=" * 62 + "\n")
+        sys.stderr.write(detail.rstrip() + "\n\n")
+        sys.stderr.write(f"当前解释器：{sys.executable}\n")
+        sys.stderr.write(f"Python 版本：{sys.version.split()[0]}\n\n")
+        sys.stderr.write("建议改用双击启动： 启动_设计工作台.bat\n"
+                         r"或指定解释器： D:\python\envs\mar\python.exe design_studio.py"
+                         "\n\n")
+        sys.stderr.flush()
+        # 双击 bat 时不要因为报错就把窗口关掉，让用户能看清原因
+        if sys.stdin is not None and sys.stdin.isatty():
+            try:
+                input("按回车键关闭…")
+            except Exception:                                   # noqa: BLE001
+                pass
+        sys.exit(code)
+
+    try:
+        _rc = main(sys.argv)
+    except SystemExit:
+        raise
+    except BaseException as _e:                                 # noqa: BLE001
+        _die(f"{type(_e).__name__}: {_e}", _tb.format_exc())
+    else:
+        sys.exit(_rc)

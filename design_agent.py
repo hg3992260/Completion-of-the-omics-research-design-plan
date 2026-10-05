@@ -183,10 +183,49 @@ class Project:
     convergence: dict = field(default_factory=dict)
     transcript: list = field(default_factory=list)
     final_doc: str = ""
+    # 手稿附件：本课题审阅过的手稿（含审阅项目路径、缺陷统计、产出文件）。
+    # 手稿审阅页导入时会自动登记到这里，让「课题 → 它对应的手稿」可回溯。
+    manuscripts: list = field(default_factory=list)
 
     def __post_init__(self):
         for s in STAGES:
             self.stages.setdefault(str(s["id"]), blank_stage_state())
+
+    # -- 手稿附件 -----------------------------------------------------------
+    def link_manuscript(self, project_path: str, name: str = "",
+                        source: str = "", docx: str = "", out_docx: str = "",
+                        report: str = "", defects: int = 0, key_defects: int = 0,
+                        annotated: str = "") -> dict:
+        """登记/更新一份手稿附件（同一审阅项目重复登记时原地更新，不产生重复条目）。
+
+        返回这条附件记录，便于调用方直接展示。
+        """
+        rec = {
+            "name": name or "",
+            "project_path": os.path.abspath(project_path) if project_path else "",
+            "source": source or "",
+            "docx": docx or "",
+            "out_docx": out_docx or "",
+            "report": report or "",
+            "annotated": annotated or "",
+            "defects": int(defects or 0),
+            "key_defects": int(key_defects or 0),
+            "linked_at": _now(),
+        }
+        key = rec["project_path"] or rec["source"]
+        for i, old in enumerate(self.manuscripts or []):
+            if (old.get("project_path") or old.get("source")) == key:
+                rec["linked_at"] = old.get("linked_at") or rec["linked_at"]
+                self.manuscripts[i] = rec
+                break
+        else:
+            self.manuscripts = list(self.manuscripts or []) + [rec]
+        self.updated = _now()
+        return rec
+
+    def latest_manuscript(self) -> dict:
+        ms = self.manuscripts or []
+        return ms[-1] if ms else {}
 
     # -- 路径与命名 ---------------------------------------------------------
     @staticmethod
@@ -241,6 +280,7 @@ class Project:
         p.shape = d.get("shape") or {}
         p.stat = d.get("stat") or {}
         p.convergence = d.get("convergence") or {}
+        p.manuscripts = d.get("manuscripts") or []       # 旧项目没有这个字段 → []
         return p
 
     @classmethod
@@ -259,6 +299,7 @@ class Project:
                 "shape": self.shape,
                 "stat": self.stat,
                 "convergence": self.convergence,
+                "manuscripts": self.manuscripts,
                 "transcript": self.transcript[-60:], "final_doc": self.final_doc}
 
     def save(self, path: str | None = None) -> str:

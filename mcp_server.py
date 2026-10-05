@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """组学研究设计工作台 —— MCP 服务器（stdio）。
 
-把工作台的能力暴露成 agent 可调用的 MCP 工具，分三层：
+把工作台的能力暴露成 agent 可调用的 MCP 工具，分四层：
     1. 知识层：十阶段标准流程、规范条目（不需要网络）
     2. 领域层：追问 / 改写 / 汇总三个 agent 环节 + 项目读写（走 DeepSeek）
     3. 通道层：llm_chat / llm_models 原样透传，agent 可把本服务当 LLM 网关用
+    4. 手稿审阅层：导入 PDF/Word 手稿，按「引导式组学 / 统计 / 撰写」三层架构
+       逐条对照找缺陷，并把缺陷落回 Word（原生批注 + 四色 Track Changes 修订）
 
 运行（stdio）：
     D:\\python\\envs\\mar\\python.exe mcp_server.py
@@ -27,6 +29,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -306,6 +309,261 @@ def export_docx(project: str) -> str:
     except Exception as e:                                         # noqa: BLE001
         return json.dumps({"error": f"导出 Word 失败：{e}"}, ensure_ascii=False)
     return json.dumps({"path": path, "bytes": os.path.getsize(path)}, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------- 手稿审阅层
+# 一次会话里保留「当前审阅项目」，让 review / defects / apply 能接着上一步做。
+_MR = {"project": None, "busy": False}
+_MR_LOCK = threading.Lock()
+
+
+def _mr_engine():
+    from manuscript_review.mr_engine import RevEngine
+    try:
+        c = client()
+    except Exception:                                              # noqa: BLE001
+        c = None
+    return RevEngine(c)
+
+
+def _mr_load(name_or_path: str):
+    """按项目名 / 路径 / 内存当前项目解析出一个 ReviewProject。"""
+    from manuscript_review.mr_engine import ReviewProject
+    if not name_or_path:
+        return _MR["project"]
+    if os.path.exists(name_or_path):
+        return ReviewProject.load(name_or_path)
+    stem = name_or_path.strip()
+    for meta in ReviewProject.list_all():
+        if meta["name"] == stem or os.path.basename(meta["path"]) == stem or \
+                os.path.basename(meta["path"]) == stem + ".json":
+            return ReviewProject.load(meta["path"])
+    return _MR["project"]
+
+
+@mcp.tool()
+def manuscript_layers() -> str:
+    """列出「手稿缺陷审阅」的三层审阅条目统计（组学 / 统计 / 撰写）。
+
+    三层条目全部派生自本工作台已有的权威数据：
+        组学 = stages_data.STAGES（十阶段 · TRIPOD+AI / CLEAR / METRICS / IBSI）
+        统计 = stat_data.STAGES（9 阶段）
+        撰写 = shape_data.SHAPE（Glasman-Deal 七章通用模型）
+    """
+    from manuscript_review.mr_review_layers import LAYERS, LAYER_ORDER, stats
+    st = stats()
+    return json.dumps({"layers": [
+        {"key": k, "name": LAYERS[k]["name"], "sub": LAYERS[k]["sub"],
+         "why": LAYERS[k]["why"], **{kk: vv for kk, vv in st[k].items()}}
+        for k in LAYER_ORDER], "total": st["total"]}, ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def manuscript_review(path: str, layers: str = "omics,stat,shape",
+                      skip_llm: bool = False, max_batches: int = 0,
+                      autonomy: str = "revise", merge_into: str = "",
+                      reply_mode: str = "reply", per_parent: int = 4,
+                      incremental: bool = False) -> str:
+    """导入手稿（PDF / Word）→ 三层架构对照找缺陷 → **自主把批注写进 Word** → 出报告。
+
+    这是「一条命令跑完整审阅」的入口：跑完即得到带批注（及可选修订）的 Word，
+    不需要再单独调用落盘工具。PDF 会先转成 DOCX 转换稿，审阅与修订都作用于转换稿。
+
+    Args:
+        path: 手稿路径（.pdf / .docx）
+        layers: 要审的层，逗号分隔，取值 omics / stat / shape
+        skip_llm: True 时只跑确定性核验（不联网、不花钱，可证据化的硬缺陷照样报）
+        max_batches: >0 时每层最多跑多少批 LLM（调试用）
+        autonomy: **自主落盘程度** —— 审阅跑完自动写到什么程度
+            revise  = 批注 + 用 Track Changes 补写缺失报告项（默认，最完整）
+            comment = 只挂批注，不增删正文（结构还在调整时用）
+            report  = 只出报告，完全不碰 Word
+        merge_into: 「审稿批注版」路径。给了它就以该文件为底板，
+            匹配得上的发现作为**线程回复**挂到审稿意见下面（保留审稿人原批注不动）
+        reply_mode: reply（默认，线程回复）/ standalone（只做独立批注）
+        per_parent: 一条审稿意见最多收几条回复
+        incremental: True 时只把本次新报出的发现写到已有修订稿（默认每次完整重写）
+    """
+    if _MR["busy"]:
+        return json.dumps({"ok": False, "error": "已有审阅任务在进行中"}, ensure_ascii=False)
+    with _MR_LOCK:
+        _MR["busy"] = True
+    try:
+        eng = _mr_engine()
+        lay = [x.strip() for x in (layers or "").split(",") if x.strip()] or None
+        steps = []
+        ok, msg, proj = eng.run_all(
+            path, layers=lay, skip_llm=skip_llm, max_batches=max_batches,
+            autonomy=autonomy, merge_into=merge_into, reply_mode=reply_mode,
+            per_parent=per_parent, fresh=not incremental,
+            on_step=lambda s, m: steps.append({"step": s, "msg": m}))
+        _MR["project"] = proj
+        ap = proj.applied or {}
+        return json.dumps({
+            "ok": bool(proj.out_docx) or autonomy == "report",
+            "steps": steps,
+            "project": proj.name, "project_path": proj.path(),
+            "autonomy": autonomy,
+            "converted": proj.converted, "docx_path": proj.docx_path,
+            "outline": proj.outline,
+            "signal_summary": proj.signal_summary,
+            "summary": proj.summary,
+            "out_docx": proj.out_docx,
+            "report_path": proj.report_path,
+            "comments_added": ap.get("comments_added"),
+            "replies_added": ap.get("replies_added"),
+            "revisions_added": ap.get("revisions_added"),
+            "merge_plan": ap.get("merge_plan"),
+            "threading": ap.get("threading"),
+            "applied_keys": len(proj.applied_keys or []),
+            "defects": _mr_defect_rows(proj.defects),
+            "warnings": proj.warnings,
+        }, ensure_ascii=False, indent=1)
+    finally:
+        with _MR_LOCK:
+            _MR["busy"] = False
+
+
+def _mr_defect_rows(defects: list, limit: int = 0) -> list[dict]:
+    rows = []
+    for d in (defects or []):
+        rows.append({
+            "severity": d.get("severity"), "layer": d.get("layer"),
+            "ref": d.get("ref"), "spec": d.get("spec"),
+            "title": d.get("title"), "why": d.get("why"),
+            "evidence": (d.get("evidence") or "")[:200],
+            "suggestion": d.get("suggestion"),
+            "para_idx": d.get("para_idx"), "chapter": d.get("chapter"),
+            "source": d.get("source"), "req_id": d.get("req_id"),
+        })
+    return rows[:limit] if limit else rows
+
+
+@mcp.tool()
+def manuscript_defects(project: str = "", layer: str = "", severity: str = "",
+                       limit: int = 0) -> str:
+    """查询当前（或指定）审阅项目的缺陷清单，可按层与严重度过滤。
+
+    Args:
+        project: 项目名或项目 JSON 路径；留空=用本会话最近一次审阅结果
+        layer: omics / stat / shape，留空=全部
+        severity: 关键 / 主要 / 一般，留空=全部
+        limit: 最多返回多少条（0=全部）
+    """
+    p = _mr_load(project)
+    if p is None:
+        return json.dumps({"ok": False,
+                           "error": "没有审阅项目，请先调用 manuscript_review"},
+                          ensure_ascii=False)
+    ds = p.defects or []
+    if layer:
+        ds = [d for d in ds if d.get("layer") == layer]
+    if severity:
+        ds = [d for d in ds if d.get("severity") == severity]
+    return json.dumps({
+        "ok": True, "project": p.name,
+        "summary": p.summary, "signal_summary": p.signal_summary,
+        "returned": len(ds), "defects": _mr_defect_rows(ds, limit),
+    }, ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def manuscript_annotated_info(path: str) -> str:
+    """探测一份手稿是否带**审稿批注**（决定能否做「线程回复」并入）。
+
+    返回批注条数、作者、以及每条批注锚定在第几段。
+    要并入线程回复时，先用它确认目标文件选对了。
+    """
+    from manuscript_review import mr_thread
+    if not os.path.exists(path):
+        return json.dumps({"ok": False, "error": f"文件不存在：{path}"},
+                          ensure_ascii=False)
+    info = mr_thread.probe(path)
+    return json.dumps({"ok": True, **info}, ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def manuscript_apply(project: str = "", mode: str = "dual",
+                     max_insert: int = 25, merge_into: str = "",
+                     reply_mode: str = "reply", per_parent: int = 4) -> str:
+    """把缺陷落回 Word：原生批注 + 四色 Track Changes 修订，返回生成的文件路径。
+
+    两种产出方式：
+        1. 独立批注（默认）：我们的发现作为新批注挂在手稿对应段落上。
+        2. **并入审稿批注版**（给 merge_into）：以那份文件为底板，
+           匹配得上的发现作为**线程回复**挂到审稿意见下面（Word 审阅窗格会嵌套显示），
+           审稿人原有批注一个字都不动。
+
+    每条批注写清：层次+严重度 / 规范条目 / 缺陷 / 证据 / 建议。
+    正文修订四色：绿 00B050 增 · 红 FF0000 删 · 蓝 0070C0 改 · 橙 ED7D31 移。
+
+    Args:
+        project: 项目名或路径；留空=本会话最近一次
+        mode: dual（批注+修订，默认）/ comment_only（只出批注，不碰正文）
+        max_insert: 最多补写多少段（默认 25）
+        merge_into: 「审稿批注版」手稿路径。给了它就并入该文件（线程回复）
+        reply_mode: reply（默认，做线程回复）/ standalone（只做独立批注）
+        per_parent: 一条审稿意见最多收几条回复（默认 4）
+    """
+    p = _mr_load(project)
+    if p is None:
+        return json.dumps({"ok": False,
+                           "error": "没有审阅项目，请先调用 manuscript_review"},
+                          ensure_ascii=False)
+    eng = _mr_engine()
+    ok, msg, p = eng.apply_to_word(p, mode=mode, max_insert=max_insert,
+                                   merge_into=merge_into,
+                                   reply_mode=reply_mode, per_parent=per_parent)
+    _MR["project"] = p
+    ap = p.applied or {}
+    return json.dumps({"ok": ok, "msg": msg, "out_docx": p.out_docx,
+                       "comments_added": ap.get("comments_added"),
+                       "replies_added": ap.get("replies_added"),
+                       "revisions_added": ap.get("revisions_added"),
+                       "merge_plan": ap.get("merge_plan"),
+                       "threading": ap.get("threading"),
+                       "applied": ap}, ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def manuscript_report(project: str = "") -> str:
+    """生成审阅报告：Markdown + HTML + 缺陷清单 CSV，返回三者的路径。"""
+    p = _mr_load(project)
+    if p is None:
+        return json.dumps({"ok": False,
+                           "error": "没有审阅项目，请先调用 manuscript_review"},
+                          ensure_ascii=False)
+    eng = _mr_engine()
+    ok, msg, p = eng.build_report(p)
+    _MR["project"] = p
+    d = os.path.dirname(p.report_path or "")
+    stem = os.path.splitext(os.path.basename(p.report_path or ""))[0]
+    return json.dumps({"ok": ok, "msg": msg, "markdown": p.report_path,
+                       "html": os.path.join(d, stem + ".html") if d else "",
+                       "csv": os.path.join(d, stem.replace("_审阅报告", "_缺陷清单")
+                                           + ".csv") if d else ""},
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def manuscript_projects() -> str:
+    """列出所有手稿审阅项目（名称、缺陷数、更新时间、修订稿路径）。"""
+    from manuscript_review.mr_engine import ReviewProject
+    return json.dumps(ReviewProject.list_all(), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def manuscript_toolchain() -> str:
+    """手稿审阅的外部依赖就绪情况：OfficeCLI（Word 批注/修订）与 PDF 转换。"""
+    from manuscript_review import mr_office, mr_pdf, mr_word
+    return json.dumps({"officecli": mr_office.available(),
+                       "pdf": mr_pdf.available(),
+                       "revision_colors": {"新增": mr_word.C_NEW,
+                                           "删除": mr_word.C_DEL,
+                                           "修改": mr_word.C_MOD,
+                                           "移动": mr_word.C_MOVE},
+                       "python": sys.version.split()[0]},
+                      ensure_ascii=False, indent=1)
 
 
 # --------------------------------------------------------------------- 通道层
