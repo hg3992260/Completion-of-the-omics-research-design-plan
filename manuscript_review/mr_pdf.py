@@ -56,16 +56,35 @@ class ConvertResult:
                 "error": self.error}
 
 
+def _load_fitz():
+    """拿到 PyMuPDF 模块。
+
+    PyMuPDF ≥1.28 起把 `import fitz` 标为弃用（会向 stderr 打 warning），
+    正式导入名是 `pymupdf`。只认 `fitz` 会导致**可用却判为不可用**：
+    实测 PyMuPDF 1.28.2 下 `--toolchain` 误报 pymupdf=False 并返回非 0。
+    这里优先新名，回退旧名，两者都不行才算缺失。
+    """
+    try:
+        import pymupdf
+        return pymupdf
+    except Exception:                                              # noqa: BLE001
+        pass
+    try:
+        import fitz
+        return fitz
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
 def available() -> dict:
     """返回 PDF 转换所需依赖的就绪情况。"""
     info = {"pymupdf": False, "version": "", "pdf2docx": False}
-    try:
-        import fitz
+    mod = _load_fitz()
+    if mod is not None:
         info["pymupdf"] = True
-        info["version"] = getattr(fitz, "__doc__", "") and \
-            getattr(fitz, "VersionBind", "") or ""
-    except Exception:                                              # noqa: BLE001
-        pass
+        info["version"] = (getattr(mod, "VersionBind", "")
+                           or getattr(mod, "__version__", "") or "")
+        info["module"] = getattr(mod, "__name__", "")
     try:
         import pdf2docx                                          # noqa: F401
         info["pdf2docx"] = True
@@ -183,10 +202,9 @@ def _is_noise(t: str, y: float, page_h: float) -> bool:
 def extract_lines(pdf_path: str, max_pages: int = 0) -> tuple[list[dict], int, list[str]]:
     """抽取全文行。返回 (lines, 页数, warnings)。"""
     warns: list[str] = []
-    try:
-        import fitz
-    except ImportError as e:                                       # pragma: no cover
-        raise RuntimeError("缺少 PyMuPDF：pip install pymupdf") from e
+    fitz = _load_fitz()
+    if fitz is None:
+        raise RuntimeError("缺少 PyMuPDF：pip install pymupdf")
 
     doc = fitz.open(pdf_path)
     try:

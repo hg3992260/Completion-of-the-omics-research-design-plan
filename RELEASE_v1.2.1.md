@@ -65,11 +65,21 @@ PCLRadiomics.exe mr 手稿.docx                       :: 别名
   （原先前者的包内 `cli` 子模块没被收进去），并新增**打包前置校验** ——
   硬编码进 `hiddenimports` 的本地模块逐个真实导入，任一失败即**中止打包**，
   不再产出「能编译但缺功能」的坏包。
-- CI（`.github/workflows/build-windows.yml` / `build-macos.yml`）：导入自检补上
-  `manuscript_review` 与 `docx_export`；打包后对**冻结产物**执行
-  `manuscript_review --selfcheck`，不齐备就让构建失败。这正是当初漏掉问题的原因。
 - `requirements.txt` 补上 **PyMuPDF**（`fitz`）—— 它是导入 PDF 的依赖，原先只在本地环境有。
 - `.gitignore`：忽略 `_dl/`、`_repro/`、`_fixed/` 与 `标准流程检查表_*.md` 等产物。
+
+### 6. 代码整理（非缺陷修复）
+
+- `mr_pdf` 的 PyMuPDF 导入改为**优先 `pymupdf`、回退 `fitz`**，并抽出 `_load_fitz()` 统一取用。
+  PyMuPDF ≥1.28 起 `import fitz` 已标为弃用（会向 stderr 打 warning），新名是 `pymupdf`。
+  版本取值也从 `(__doc__ and VersionBind) or ""` 改成
+  `VersionBind or __version__ or ""` —— 前者是"先看 `__doc__` 真不真"，
+  一旦 `__doc__` 为空就会把版本读成空串（本机实测两者恰好一致，属脆弱写法而非活跃缺陷）。
+  三条分支（新名 / 仅 `fitz` / 都缺失时报错）均有断言覆盖。
+
+> **说明**：本版 CI 产物已含此整理。它**不影响功能**（`fitz` 在 1.28.2 下仍可用），
+> 仅为消除弃用告警并让版本读取更稳。若要核对，`manuscript_review --toolchain`
+> 现在不会再打 `fitz` 弃用警告。
 
 ---
 
