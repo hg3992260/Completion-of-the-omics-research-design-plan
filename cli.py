@@ -9,6 +9,11 @@
     pclradiomics.exe projects               列出项目与完成度
     pclradiomics.exe paths                  打印路径解析（排查冻结后的读写位置）
     pclradiomics.exe check                  自检：依赖、凭据、模型连通性
+    pclradiomics.exe manuscript_review ...  手稿缺陷审阅（别名 mr）
+        ... --selfcheck                    逐个子模块自检（排查「功能没打进 exe」）
+        ... --toolchain                    外部依赖（OfficeCLI / PyMuPDF）就绪情况
+        ... --layers-info                  三层审阅条目统计
+        ... <手稿.docx|pdf>                直接跑审阅并自动落盘
 
 不传子命令时按 exe 名判断：含 "服务"/"serve" 则进服务模式，否则进界面。
 """
@@ -120,6 +125,17 @@ def _banner() -> None:
 def cmd_gui(argv: list) -> int:
     import design_studio
     return design_studio.main(["design_studio"] + argv)
+
+
+def cmd_manuscript(argv: list) -> int:
+    """手稿缺陷审阅（第 5 个视图的后端），供打包版从命令行直接调用。
+
+    存在的意义：打包成 exe 后没法用 `python -m manuscript_review.cli`，
+    而排查「功能到底有没有打进去」需要一条不依赖界面的入口 ——
+    例如 `PCLRadiomics.exe manuscript_review --selfcheck`。
+    """
+    from manuscript_review import cli as mr_cli
+    return mr_cli.main(argv)
 
 
 def cmd_mcp(argv: list) -> int:
@@ -244,7 +260,7 @@ def cmd_net(argv: list) -> int:
 
 COMMANDS = {"gui": cmd_gui, "net": cmd_net, "mcp": cmd_mcp, "api": cmd_api, "serve": cmd_api,
             "stages": cmd_stages, "projects": cmd_projects, "paths": cmd_paths,
-            "check": cmd_check}
+            "check": cmd_check, "manuscript_review": cmd_manuscript, "mr": cmd_manuscript}
 
 
 def main(argv: list | None = None) -> int:
