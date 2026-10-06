@@ -142,13 +142,20 @@ def pixel_contrast(widget, tag: str, min_delta: float = 90.0):
 
 def run():
     report, total = [], 0
-    for view_name, fn, pick in (("Statistic", win.show_stat, 1),
-                                ("SCI Shape", win.show_sci_shape, 3),
-                                ("总览", win.show_overview, None),
-                                ("工作台", win.show_workspace, None)):
+    VIEWS = (("Statistic", win.show_stat, 1),
+             ("SCI Shape", win.show_sci_shape, 3),
+             ("总览", win.show_overview, None),
+             ("工作台", win.show_workspace, None),
+             # 手稿审阅是第 5 个原生视图，原先漏检 —— 用户报的深色可读性问题就在这里
+             ("手稿审阅", win.show_mr, 0))
+    for view_name, fn, pick in VIEWS:
         fn()
         if pick is not None:
-            (win.stat_page if view_name == "Statistic" else win.shape_page).pick(pick)
+            page = {"Statistic": win.stat_page,
+                    "SCI Shape": win.shape_page,
+                    "手稿审阅": win.mr_page}.get(view_name)
+            if page is not None:
+                page.pick(pick)
         for _ in range(3):
             win.layout().activate()
             QApplication.processEvents()
@@ -157,13 +164,14 @@ def run():
         total += n
     # 切深色（这是用户实际遇到问题的场景）
     win.toggle_mode()
-    for view_name, fn, pick in (("Statistic", win.show_stat, 1),
-                                ("SCI Shape", win.show_sci_shape, 3),
-                                ("总览", win.show_overview, None),
-                                ("工作台", win.show_workspace, None)):
+    for view_name, fn, pick in VIEWS:
         fn()
         if pick is not None:
-            (win.stat_page if view_name == "Statistic" else win.shape_page).pick(pick)
+            page = {"Statistic": win.stat_page,
+                    "SCI Shape": win.shape_page,
+                    "手稿审阅": win.mr_page}.get(view_name)
+            if page is not None:
+                page.pick(pick)
         for _ in range(3):
             win.layout().activate()
             QApplication.processEvents()
@@ -185,15 +193,21 @@ def run():
         probe._background_color = keep
         probe._change_theme()
         QApplication.processEvents()
-    # 像素级验收：深色下两张页面的中栏与右栏（用户报的就是这两页）
-    for name, page in (("Statistic", win.stat_page), ("SCI Shape", win.shape_page)):
-        win.show_stat() if name == "Statistic" else win.show_sci_shape()
-        page.pick(1)
+    # 像素级验收：深色下各页的中栏与右栏（用户报的就是这些页）
+    PAGES = (("Statistic", win.stat_page, win.show_stat),
+             ("SCI Shape", win.shape_page, win.show_sci_shape),
+             ("手稿审阅", win.mr_page, win.show_mr))
+    for name, page, shower in PAGES:
+        shower()
+        page.pick(1) if name != "手稿审阅" else page.pick(0)
         for _ in range(3):
             win.layout().activate()
             QApplication.processEvents()
         for part in ("center", "side"):
-            lines, n = pixel_contrast(getattr(page, part), f"深色 {name}.{part}")
+            w = getattr(page, part, None)
+            if w is None:
+                continue
+            lines, n = pixel_contrast(w, f"深色 {name}.{part}")
             report += lines
             total += n
     # 切回浅色，确认可逆

@@ -235,7 +235,37 @@ def _verdict_paragraph(summ: dict, sig: dict, project) -> str:
 
 
 # --------------------------------------------------------------------------- 导出
+def _artifacts(d: str, name: str) -> dict:
+    """一次审阅产出的四种形态（含 Word，由 mr_word 负责写）。"""
+    base = _safe(name)
+    return {
+        "md": os.path.join(d, f"{base}_审阅报告.md"),
+        "html": os.path.join(d, f"{base}_审阅报告.html"),
+        "csv": os.path.join(d, f"{base}_缺陷清单.csv"),
+    }
+
+
+def artifacts(project) -> dict:
+    """列出该项目的报告产物路径（只算路径，不写盘）。"""
+    from manuscript_review.mr_engine import exports_root
+    a = _artifacts(exports_root(), project.name or "未命名手稿")
+    if project.out_docx:
+        a["docx"] = project.out_docx
+    return a
+
+
+def all_present(project) -> bool:
+    """四种形态是否都已存在（用于「已缓存、不必重跑」判定）。"""
+    a = artifacts(project)
+    return bool(a.get("docx")) and all(os.path.exists(p) for p in a.values())
+
+
 def write_markdown(project, manuscript=None, out_dir: str = "") -> str:
+    """写 Markdown，并顺带产出 HTML 与 CSV。返回 Markdown 路径。
+
+    注意：**一次调用就产出三种形态**（MD + HTML + CSV），Word 由 mr_word 另行产出。
+    界面上的导出菜单据此显示"已缓存/将生成"，避免用户以为要跑四次。
+    """
     from manuscript_review.mr_engine import exports_root
     d = out_dir or exports_root()
     os.makedirs(d, exist_ok=True)

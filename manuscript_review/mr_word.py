@@ -462,6 +462,13 @@ def apply_plan(src_path: str, out_path: str, plan: ApplyPlan,
     try:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         shutil.copyfile(src_path, out_path)
+    except PermissionError:
+        # 最常见的成因：上一次产出的修订稿还开在 Word 里，文件被独占锁定。
+        # 原始 OSError 只说 "Permission denied"，用户看不出该做什么，所以这里给出可操作提示。
+        res.error = (f"无法写入 {os.path.basename(out_path)}：文件正被其它程序占用"
+                     f"（多半是 Word 还开着这份修订稿）。请关闭该文件后重试，"
+                     f"或先在 Word 里另存为别的文件名。")
+        return res
     except Exception as e:                                         # noqa: BLE001
         res.error = f"无法创建输出副本：{e}"
         return res

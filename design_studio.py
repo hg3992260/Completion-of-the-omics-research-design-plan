@@ -1087,6 +1087,7 @@ _MR_ACT_LABEL = {
     "signals": "正在跑确定性核验",
     "review": "正在做语义审阅（LLM）",
     "report": "正在生成审阅报告",
+    "report_force": "正在重新生成审阅报告（强制重算）",
     "apply": "正在写入 Word 批注与修订",
     "all": "正在跑一键审阅全流程",
 }
@@ -1143,6 +1144,10 @@ class ManuscriptWorker(QtCore.QThread):
                 self.step.emit("review", msg)
             elif act == "report":
                 ok, msg, proj = eng.build_report(proj)
+                self.step.emit("report", msg)
+            elif act == "report_force":
+                # 强制重算：忽略「四种形态已缓存」的短路
+                ok, msg, proj = eng.build_report(proj, reuse=False)
                 self.step.emit("report", msg)
             elif act == "apply":
                 # 若用户选过「审稿批注版」，就把发现作为线程回复并入它
@@ -1241,8 +1246,8 @@ class ManuscriptReviewPage:
                 ("report", "只出报告，不碰 Word")):
             self.autonomy_box.addItem(label, key)
         self.autonomy_box.setStyleSheet(
-            f"QComboBox {{ background:{PAL['surface2']}; color:{PAL['text']};"
-            f" border:1px solid {PAL['border']}; border-radius:7px;"
+            f"QComboBox {{ background:{C('surface2')}; color:{C('text')};"
+            f" border:1px solid {C('border')}; border-radius:7px;"
             f" padding:4px 8px; font-size:9pt; }}")
         self.autonomy_box.setFixedWidth(272)
         self.autonomy_box.currentIndexChanged.connect(self._sync_auto_note)
@@ -1406,12 +1411,18 @@ class ManuscriptReviewPage:
     def _set_status(self, text: str, tone: str = "muted", bold: bool = False):
         """写左栏状态行，并按语气着色。
 
-        注意：left_status 是 ui_kit 的 RefitLabel（自适应高度标签），
-        真正能干活的 QLabel 要通过 .label() 拿 —— 直接把 RefitLabel 当 QLabel 用
-        会抛 AttributeError（例如它没有 setStyleSheet），
-        而这个异常发生在 Qt 信号回调里会被吞掉，表现为「点了没反应」。
+        两个必须记住的点：
+        1. `left_status` 是 ui_kit 的 RefitLabel（自适应高度标签），
+           真正能干活的 QLabel 要通过 .label() 拿 —— 直接把 RefitLabel 当 QLabel 用
+           会抛 AttributeError（例如它没有 setStyleSheet），
+           而这个异常发生在 Qt 信号回调里会被吞掉，表现为「点了没反应」。
+        2. 颜色必须用 `C(key)` 而不是 `PAL[key]`：PAL 存的是 **(浅色, 深色) 元组**，
+           拼进样式表会生成 `color:('#6A8095', '#989AA4');` 这种非法值，
+           整条规则被 Qt 丢弃、文字退回默认色 —— 深色模式下就表现为"字体仍是深色、
+           读不清"。这是本页深色可读性问题的根因。
         """
-        col = PAL.get(tone, PAL["text"])
+        self._status_tone, self._status_bold = tone, bold
+        col = C(tone if tone in PAL else "text")
         lbl = self.left_status.label() if hasattr(self.left_status, "label") \
             else self.left_status
         lbl.setText(text)
@@ -1576,7 +1587,8 @@ class ManuscriptReviewPage:
         # 需要「已有项目」的操作：signals/review/report/apply 必须导过稿。
         # 但 all（一键审阅全流程）自带导入，只要给了路径就能从零跑完 ——
         # 早先这里把 all 也一起挡掉，导致首次点「一键审阅全流程」毫无反应。
-        if act in ("signals", "review", "report", "apply") and self.proj is None:
+        if act in ("signals", "review", "report", "report_force", "apply") \
+                and self.proj is None:
             self._log("请先点「① 导入手稿（PDF / Word）」。", "warn")
             return
         if act == "all" and not path:
@@ -1844,6 +1856,43 @@ class ManuscriptReviewPage:
         self.refit_all()
         QtCore.QTimer.singleShot(0, self.refit_all)
 
+    def reapply_theme(self):
+        """深浅色切换后重新套用本页自己写的样式表。
+
+        为什么必须单独做：`toggle_mode()` 会对每个控件调 `_change_theme()`，
+        但那只恢复 PyCt6 自己的配色 —— **我们自己 `setStyleSheet` 写进去的颜色不会更新**，
+        于是切到深色后这几处仍留在浅色的字色上（且若当初拼进了 PAL 元组，
+        整条规则根本就是非法值被丢弃）。
+        """
+        # 状态行：按上次的语气重新着色（文案保持不变）
+        try:
+            lbl = self.left_status.label() if hasattr(self.left_status, "label") \
+                else self.left_status
+            tone = getattr(self, "_status_tone", "muted")
+            bold = getattr(self, "_status_bold", False)
+            lbl.setStyleSheet(
+                f"QLabel {{ background:transparent; color:{C(tone if tone in PAL else 'text')};"
+                f" font-weight:{700 if bold else 400}; }}")
+        except Exception:                                          # noqa: BLE001
+            pass
+        # 课题关联提示：按上次的语气重新着色（_link_tone 现在是键名，交给 C() 即可）
+        try:
+            lbl = getattr(self, "link_lbl", None)
+            if lbl is not None:
+                tone = getattr(self, "_link_tone", "muted")
+                lbl.label().setStyleSheet(
+                    f"QLabel {{ background:transparent; color:{C(tone)}; }}")
+        except Exception:                                          # noqa: BLE001
+            pass
+        # 自主落盘下拉框：整条样式表按新配色重写
+        try:
+            self.autonomy_box.setStyleSheet(
+                f"QComboBox {{ background:{C('surface2')}; color:{C('text')};"
+                f" border:1px solid {C('border')}; border-radius:7px;"
+                f" padding:4px 8px; font-size:9pt; }}")
+        except Exception:                                          # noqa: BLE001
+            pass
+
     def _render_link(self, p):
         """显示课题关联：这份手稿挂在哪个课题下、课题里已登记几份、背景是否已带入。"""
         lbl = getattr(self, "link_lbl", None)
@@ -1854,7 +1903,7 @@ class ManuscriptReviewPage:
         if p is None:
             txt = (f"导入时自动登记为课题「{cur_name}」的手稿附件"
                    if cur_name else "（无当前课题）")
-            color = PAL["muted"]
+            color = "muted"
         else:
             bound = p.design_name or "（未关联）"
             n = 0
@@ -1868,10 +1917,14 @@ class ManuscriptReviewPage:
                 txt += f"　·　背景 {len(p.design_digest)} 字已带入审阅"
             if not same and cur_name:
                 txt += f"（注意：当前工作台是「{cur_name}」）"
-            color = PAL["ok"] if same else PAL["warn"]
+            color = "ok" if same else "warn"
+        self._link_tone = color
         lbl.label().setText(txt)
+        # 颜色必须用 C() 取当前模式的解析值。这里取的是**键名**（"ok"/"warn"/"muted"），
+        # 不能把 PAL 的元组直接交给 C()（会 KeyError），也不能把元组拼进样式表
+        # （会生成非法颜色值、整条规则被 Qt 丢掉 —— 深色下"字体仍是深色"的根因）。
         lbl.label().setStyleSheet(
-            f"QLabel {{ background:transparent; color:{color}; }}")
+            f"QLabel {{ background:transparent; color:{C(color)}; }}")
 
     def _render_detail(self):
         from manuscript_review.mr_review_layers import LAYERS
@@ -3231,21 +3284,98 @@ class StudioWindow(CMainWindow):
 
     def footer_export(self):
         """右下角「导出」：弹一个小菜单，按当前视图给出可用的导出项。"""
+        m = self.build_export_menu()
+        m.exec(self.foot_btns["export"].mapToGlobal(
+            QtCore.QPoint(0, self.foot_btns["export"].height())))
+
+    def build_export_menu(self) -> QtWidgets.QMenu:
+        """构建导出菜单（与弹出分离，便于自检直接检查菜单内容）。
+
+        手稿审阅页的菜单会**列出四种形态的完整路径**，并标明「已缓存 / 将生成」：
+        MD + HTML + CSV 是**同一次报告生成**一起产出的（不是三次），Word 由落盘步骤产出。
+        已缓存时点击只做「打开」，不会再跑一遍 —— 用户不必猜文件在哪、也不必重复等待。
+        """
         idx = self.body_stack.currentIndex() if hasattr(self, "body_stack") else 0
         m = QtWidgets.QMenu(self)
         if idx == 4 and hasattr(self, "mr_page"):
-            m.addAction("审阅报告（Markdown + HTML + CSV）",
-                        self.mr_page.run_act_report)
-            m.addAction("修订稿 Word（批注 + 四色修订）",
-                        self.mr_page.run_act_apply)
-            m.addSeparator()
-            m.addAction("打开修订稿", self.mr_page.open_docx)
-            m.addAction("打开审阅报告", self.mr_page.open_report)
+            self._mr_export_menu(m)
         else:
             m.addAction("导出 Markdown（Ctrl+E）", self.export_md)
             m.addAction("导出 Word（Ctrl+Shift+E）", self.export_docx)
-        m.exec(self.foot_btns["export"].mapToGlobal(
-            QtCore.QPoint(0, self.foot_btns["export"].height())))
+        return m
+
+    def _mr_export_menu(self, m: QtWidgets.QMenu):
+        """手稿审阅的导出菜单：四种形态 + 路径提示 + 缓存状态。"""
+        page = self.mr_page
+        p = page.proj
+        if p is None:
+            m.addAction("尚未导入手稿 —— 先点「① 导入手稿」").setEnabled(False)
+            return
+        try:
+            from manuscript_review import mr_report
+            from manuscript_review.mr_engine import exports_root
+            a = mr_report.artifacts(p)
+            # Word 也纳入清单，凑齐"四种形态"（md / html / csv / docx）。
+            # 未落盘时按导出口径推出它将会落在哪，好让用户提前知道路径。
+            if not a.get("docx"):
+                suffix = "_并入批注版" if p.annotated_path else "_审阅修订版"
+                a["docx"] = os.path.join(
+                    exports_root(), f"{mr_report._safe(p.name)}{suffix}.docx")
+        except Exception as e:                                     # noqa: BLE001
+            m.addAction(f"无法解析导出路径：{e}").setEnabled(False)
+            return
+        # 四种形态的显示名（顺序即菜单顺序）
+        LABEL = {"md": "Markdown 报告",
+                 "html": "HTML 报告（可直接打印成 PDF）",
+                 "csv": "缺陷清单 CSV（Excel 排期）",
+                 "docx": "Word 修订稿（批注 + 四色修订）"}
+        for key in ("md", "html", "csv", "docx"):
+            path = a.get(key) or ""
+            title = LABEL[key]
+            exists = bool(path) and os.path.exists(path)
+            head = f"{'✓ 已缓存' if exists else '· 将生成'}  {title}"
+            act = m.addAction(head)
+            act.setToolTip(path)
+            sub = m.addMenu(f"    {title} —— {path or '（尚未生成）'}")
+            if exists:
+                sub.addAction("打开文件", lambda _=False, q=path: self._open_path(q))
+                sub.addAction("打开所在文件夹",
+                              lambda _=False, q=path: self._reveal(q))
+            else:
+                sub.addAction("立即生成", page.run_act_report if key != "docx"
+                              else page.run_act_apply)
+            sub.addAction(f"路径：{path or '（待定）'}").setEnabled(False)
+        m.addSeparator()
+        all_cached = all(a.get(k) and os.path.exists(a[k]) for k in
+                         ("md", "html", "csv", "docx"))
+        note = m.addAction("四种形态均已缓存，点击不会重跑" if all_cached
+                           else "尚未齐全：缺失项会即时生成")
+        note.setEnabled(False)
+        m.addSeparator()
+        m.addAction("重新生成全部报告（强制重算）",
+                    lambda: page.run_act("report_force"))
+        m.addAction("打开审阅报告", page.open_report)
+        m.addAction("打开修订稿", page.open_docx)
+
+    def _open_path(self, path: str):
+        """用系统默认程序打开文件（不存在则提示）。"""
+        if not path or not os.path.exists(path):
+            self._toast(f"文件不存在：{path}")
+            return
+        try:
+            os.startfile(path)                                     # noqa: S606
+        except Exception as e:                                     # noqa: BLE001
+            self._toast(f"打开失败：{e}")
+
+    def _reveal(self, path: str):
+        """在资源管理器里定位文件。"""
+        if not path or not os.path.exists(path):
+            self._toast(f"文件不存在：{path}")
+            return
+        try:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        except Exception as e:                                     # noqa: BLE001
+            self._toast(f"定位失败：{e}")
 
     # ---------------------------------------------------------------- 欢迎与文档
     def _welcome(self):
@@ -3650,12 +3780,21 @@ class StudioWindow(CMainWindow):
             idx = self.body_stack.currentIndex()
             if idx == 4:
                 self.mr_page.refresh()
+                # 本页有自己写的样式表（状态行/关联提示/下拉框），
+                # PyCt6 的 _change_theme() 不会更新它们，必须显式重套。
+                self.mr_page.reapply_theme()
             elif idx == 3:
                 self.refresh_overview()
             elif idx == 2:
                 self.shape_page.refresh()
             elif idx == 1:
                 self.stat_page.refresh()
+        # 手稿审阅页即使不在前台，也把它的自定义配色跟上（否则切回该页仍是旧色）
+        if hasattr(self, "mr_page"):
+            try:
+                self.mr_page.reapply_theme()
+            except Exception:                                      # noqa: BLE001
+                pass
         if hasattr(self, "phase_pill"):
             self._set_phase_pill()      # 阶段胶囊为自定义样式，切主题后需重新套用
     def _clear_work(self):

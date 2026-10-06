@@ -74,6 +74,8 @@ class ReviewProject:
     annotated_path: str = ""                             # 选定的「审稿批注版」底板
     report_path: str = ""
     out_docx: str = ""
+    # 报告的全部形态（md/html/csv/docx）→ 路径。界面导出菜单据此显示路径与缓存状态。
+    report_files: dict = field(default_factory=dict)
     # 课题关联：这份手稿属于工作台里的哪个设计项目（导入时自动登记）
     design_name: str = ""
     design_path: str = ""
@@ -360,18 +362,35 @@ class RevEngine:
         return True, msg, project
 
     # -- 5 报告 -------------------------------------------------------------
-    def build_report(self, project: ReviewProject) -> tuple[bool, str, ReviewProject]:
+    def build_report(self, project: ReviewProject, reuse: bool = True
+                     ) -> tuple[bool, str, ReviewProject]:
+        """产出审阅报告（MD + HTML + CSV 一次全出）。
+
+        reuse=True（默认）：若四种形态（含 Word 修订稿）**都已存在**，直接复用、
+        不再重算 —— 这些文件是上一次跑出来的同一批数据，重复生成只是白花时间。
+        需要强制重算时传 reuse=False。
+        """
         from manuscript_review import mr_report
 
         ms = self._manuscript(project)
         if ms is None:
             return False, "尚未导入手稿", project
+        a = mr_report.artifacts(project)
+        if reuse and mr_report.all_present(project):
+            project.report_path = a["md"]
+            # 把四种形态都记进项目，供界面显示路径
+            project.report_files = dict(a)
+            project.add_log("report", "报告已缓存，跳过重算（MD/HTML/CSV/Word 均在）")
+            project.save()
+            return True, f"报告已是最新，直接复用：{a['md']}", project
         try:
             path = mr_report.write_markdown(project, ms)
         except Exception as e:                                     # noqa: BLE001
             return False, f"生成报告失败：{type(e).__name__}: {e}", project
         project.report_path = path
-        project.add_log("report", f"审阅报告：{os.path.basename(path)}")
+        project.report_files = dict(mr_report.artifacts(project))
+        project.add_log("report", f"审阅报告：{os.path.basename(path)}"
+                                  f"（含 HTML / CSV）")
         project.save()
         return True, f"报告已生成：{path}", project
 
@@ -534,10 +553,11 @@ class RevEngine:
             step("ingest", msg)
             if not ok:
                 return False, msg, p
-        if fresh:
-            # 新审阅：重置落盘记录，让这次结果从零写全（不残留上一轮的指纹）
-            p.applied_keys = []
-            p.add_log("apply", "全新审阅：已重置落盘记录（将完整写入全部发现）")
+        # 注意：这里**不能**直接清空 applied_keys。判定「Word 是否已是本次结果」
+        # 靠的就是上一轮的指纹；先清空会让判定永远为 False，Word 每次都重写
+        # （这正是"明明都缓存了却还要再跑一遍"的来源）。
+        # 因此先把上一轮指纹留档，等确定需要重写时再重置。
+        prev_keys = list(p.applied_keys or [])
 
         ok, msg, p = self.run_signals(p)
         step("signals", msg)
@@ -567,7 +587,16 @@ class RevEngine:
             step("apply", "本次没有报出缺陷，跳过 Word 落盘")
         elif eff == "report":
             step("apply", "按 autonomy=report：只出报告，未写入 Word")
+        elif self._word_is_fresh(p, extra_keys=prev_keys):
+            # 四种形态里 Word 已经是最新的：本次结果与上次对同一份稿子、同一批缺陷完全一致，
+            # 重写只会白花时间（并且会换掉用户可能已在 Word 里手工改过的修订稿）。
+            step("apply", f"Word 修订稿已是本次结果，直接复用：{os.path.basename(p.out_docx)}")
+            p.add_log("apply", "Word 已是最新，跳过重写")
         else:
+            if fresh:
+                # 确实要重写：这时才重置落盘记录，让这次结果从零写全（不残留上一轮指纹）
+                p.applied_keys = []
+                p.add_log("apply", "全新审阅：已重置落盘记录（将完整写入全部发现）")
             # revise 需要至少一层审阅成功；否则降级为 comment（只挂批注，不动正文）
             if eff == "revise" and not (llm_ok or p.signal_summary.get("total")):
                 eff = "comment"
@@ -588,6 +617,38 @@ class RevEngine:
         return bool(p.out_docx) or eff == "report", msg, p
 
     # -- 自主落盘（审阅流程的最后一环，不需要人工触发） ----------------------
+    @staticmethod
+    def _word_is_fresh(project: ReviewProject, extra_keys=None) -> bool:
+        """判断 Word 修订稿是否已经是「本次结果」。
+
+        判定条件（全部满足才算新鲜）：
+            ① out_docx 路径存在、文件在盘上、且文件非空；
+            ② 已记录的「已入稿」指纹 + extra_keys 覆盖了当前**全部**缺陷 ——
+               说明这批发现都写过了，没有新增内容需要落盘。
+
+        extra_keys 用于 fresh 重跑场景：`run_all` 在真正重写前才清空 applied_keys，
+        但那之前要先用**上一轮**的指纹来判断，所以由调用方把旧指纹传进来。
+
+        任一条不满足就返回 False，走正常重写，绝不因为"想省时间"而漏写批注。
+
+        注意这里刻意**不做时间戳比较**：mtime 是"上次写出文件"的时刻，
+        对齐它并不能证明内容一致，反而容易在时钟/复制等场景下误判为新鲜。
+        指纹覆盖才是真正的内容级依据。
+        """
+        if not project.out_docx or not os.path.exists(project.out_docx):
+            return False
+        try:
+            if os.path.getsize(project.out_docx) <= 0:
+                return False
+            keys = set(project.applied_keys or [])
+            keys |= set(extra_keys or [])
+            if not keys:
+                return False
+            current = {_finding_key(d) for d in (project.defects or [])}
+            return current.issubset(keys)
+        except Exception:                                          # noqa: BLE001
+            return False
+
     def review_to_word(self, project: ReviewProject, autonomy: str = "revise",
                        merge_into: str = "", reply_mode: str = "reply",
                        per_parent: int = 4, force: bool = False
