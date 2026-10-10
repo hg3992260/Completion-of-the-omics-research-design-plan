@@ -64,6 +64,45 @@ def kernel_state_file() -> str:
     return data_path(KERNEL_DIR_NAME, "kernel_instance.json")
 
 
+def _stabilize_extracted(path: str) -> str:
+    """把「从 onefile 临时解包目录里取到的」内核复制到稳定位置。
+
+    为什么必须这么做（P0 实测）：
+        onefile 会把内置文件解包到 %TEMP%\\_MEIxxxx。若直接从那里启动内核，
+        内核进程会**锁住**那个 opencode.exe，导致 PyInstaller 退出时无法删除
+        临时目录，父进程挂死 —— 实测同一命令：
+            onedir  6 s 正常退出
+            onefile 90 s+ 不退出（功能其实成功，日志已显示 session 建好）
+        复制到 <kernel_home> 后从那里启动，临时目录不再被锁，退出即正常；
+        同时内核也不再随父进程的临时目录一起消失。
+
+    仅当路径确实位于 _MEIPASS 之下时才动作；否则原样返回（onedir 不需要）。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return path
+    try:
+        if os.path.commonpath([os.path.abspath(path), os.path.abspath(meipass)]) \
+                != os.path.abspath(meipass):
+            return path
+    except ValueError:
+        return path
+
+    stable = os.path.join(kernel_home(), _EXE_NAME)
+    try:
+        same = (os.path.exists(stable)
+                and os.path.getsize(stable) == os.path.getsize(path))
+        if not same:
+            tmp = stable + ".tmp"
+            shutil.copyfile(path, tmp)
+            os.replace(tmp, stable)        # 原子替换，避免半个文件被启动
+        if os.name != "nt":
+            os.chmod(stable, 0o755)
+        return stable
+    except Exception:                                                  # noqa: BLE001
+        return path                        # 复制失败就退回原路径（功能优先）
+
+
 def opencode_exe() -> str | None:
     """定位 opencode 可执行文件。
 
@@ -73,6 +112,9 @@ def opencode_exe() -> str | None:
       3. 打包内置（resource_path → _internal/opencode/opencode.exe）
       4. 内核 home 下 opencode.exe（源码运行/手动放置）
       5. PATH
+
+    注意：onefile 场景会经 _stabilize_extracted 复制到 <kernel_home> 再返回，
+    否则内核会锁住临时解包目录、导致本进程退出时挂死。
     """
     override = os.environ.get("PCL_OPENCODE_EXE")
     if override and os.path.exists(override):
@@ -95,9 +137,10 @@ def opencode_exe() -> str | None:
 
     for cand in candidates:
         if cand and os.path.exists(cand):
-            return cand
+            return _stabilize_extracted(cand)
 
-    return shutil.which("opencode")
+    found = shutil.which("opencode")
+    return _stabilize_extracted(found) if found else None
 
 
 # ------------------------------------------------------------------- 环境变量（隔离）

@@ -13,18 +13,17 @@ error.log
 opencode/
 
 # 打包产物与缓存
+# ⚠️ 用 dist*/ build*/ 通配而不是逐个列举 —— 逐个列举漏掉一个就会把
+#    上百 MB 的产物提上去，而 GitHub 单文件硬上限 100 MB，push 会被
+#    pre-receive hook 直接拒掉（实测踩到：新增 dist-onefile-kernel/ 漏列，
+#    提交里混进 146 MB 的 PCLRadiomics.exe）。
+#    注意 .gitignore 不支持行内注释，注释必须单独占一行。
 build/
+build*/
 dist/
-# console 子系统变体的产物（PCLRadiomicsConsole）：注意 .gitignore 不支持行内注释，
-# 注释必须单独占一行，否则整行会被当成一个匹配不到任何东西的模式。
-dist-console/
-build-console/
+dist*/
 dist_onefile/
 build_onefile/
-dist-web/
-build-web/
-dist-web-scipy/
-build-web-scipy/
 *.manifest
 
 # 自检/调试输出（脚本本身保留，输出不入库）
