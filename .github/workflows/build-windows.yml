@@ -103,20 +103,38 @@ jobs:
       - name: 校验产物
         working-directory: ${{ env.APP_DIR }}
         run: |
+          # ⚠️ 主程序是 GUI（windowed）子系统：PowerShell 的 $LASTEXITCODE 对它**不可靠**
+          #    —— 不保证等待完成，且上游 `& $exe stages | Select-Object -First 3` 会提前
+          #    掐断管道，把非零退出码残留下来，害得下一个检查误判。
+          #    实测踩到：manuscript_review --selfcheck 明明打印「11/11 全部可导入」，
+          #    却因为读到上一个命令的残留码而 throw，整个构建失败。
+          #    统一改用 Start-Process -Wait -PassThru 读权威 ExitCode；输出落盘再打印
+          #    （用 Write-Host，避免混进函数的返回值）。
+          function Invoke-Frozen([string]$Exe, [string[]]$CmdArgs) {
+            $out = Join-Path $env:RUNNER_TEMP "frozen.out"
+            $err = Join-Path $env:RUNNER_TEMP "frozen.err"
+            $p = Start-Process -FilePath $Exe -ArgumentList $CmdArgs -NoNewWindow -Wait -PassThru `
+                 -RedirectStandardOutput $out -RedirectStandardError $err
+            if (Test-Path $out) { Get-Content $out | Write-Host }
+            if (Test-Path $err) { Get-Content $err | Write-Host }
+            $p.ExitCode
+          }
           if (-not (Test-Path "dist/PCLRadiomics/PCLRadiomics.exe")) { throw "未生成 exe" }
           $exe = "dist/PCLRadiomics/PCLRadiomics.exe"
-          & $exe paths
-          & $exe stages | Select-Object -First 3
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('paths')) -ne 0) { throw "冻结产物 paths 失败" }
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('stages')) -ne 0) { throw "冻结产物 stages 失败" }
           # 冻结包里手稿审阅的子模块是否齐备（"编译成功但功能缺失"的直接检查）
-          & $exe manuscript_review --selfcheck
-          if ($LASTEXITCODE -ne 0) { throw "冻结包里 manuscript_review 子模块不齐备" }
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('manuscript_review','--selfcheck')) -ne 0) {
+            throw "冻结包里 manuscript_review 子模块不齐备"
+          }
           # 冻结包里的内嵌内核：二进制是否打进、路径能否解析、21 个工具是否在
-          & $exe kernel selftest
-          if ($LASTEXITCODE -ne 0) { throw "冻结产物里内核自检不通过（二进制没打进？）" }
-          # 冻结后资源与 stdio 接管是否正常（同时验证 PyCt6 主题、certifi、win_stdio）
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('kernel','selftest')) -ne 0) {
+            throw "冻结产物里内核自检不通过（二进制没打进？）"
+          }
           # check 会联网列模型：CI 里通常没有密钥，失败不作为构建失败
-          & $exe check | Select-Object -Last 6
-          if ($LASTEXITCODE -ne 0) { Write-Host "check 未通过（多半是未配置 API Key），不阻塞构建" }
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('check')) -ne 0) {
+            Write-Host "check 未通过（多半是未配置 API Key），不阻塞构建"
+          }
           exit 0
         shell: pwsh
 
@@ -164,14 +182,26 @@ jobs:
         if: ${{ (github.event_name == 'workflow_dispatch' && inputs.onefile) || startsWith(github.ref, 'refs/tags/v') }}
         working-directory: ${{ env.APP_DIR }}
         run: |
+          # 同「校验产物」：windowed 单文件版也不能靠 $LASTEXITCODE
+          function Invoke-Frozen([string]$Exe, [string[]]$CmdArgs) {
+            $out = Join-Path $env:RUNNER_TEMP "frozen1.out"
+            $err = Join-Path $env:RUNNER_TEMP "frozen1.err"
+            $p = Start-Process -FilePath $Exe -ArgumentList $CmdArgs -NoNewWindow -Wait -PassThru `
+                 -RedirectStandardOutput $out -RedirectStandardError $err
+            if (Test-Path $out) { Get-Content $out | Write-Host }
+            if (Test-Path $err) { Get-Content $err | Write-Host }
+            $p.ExitCode
+          }
           $exe = "dist-onefile/PCLRadiomics.exe"
           if (-not (Test-Path $exe)) { throw "未生成单文件 exe" }
           Write-Host ("单文件体积: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB))
-          & $exe stages | Select-Object -First 2
-          & $exe manuscript_review --selfcheck
-          if ($LASTEXITCODE -ne 0) { throw "单文件版里 manuscript_review 子模块不齐备" }
-          # 单文件版按设计不含内核：self-test 会明确报"找不到 opencode.exe"，不算失败
-          & $exe kernel selftest | Select-Object -Last 3
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('stages')) -ne 0) { throw "单文件版 stages 失败" }
+          if ((Invoke-Frozen -Exe $exe -CmdArgs @('manuscript_review','--selfcheck')) -ne 0) {
+            throw "单文件版里 manuscript_review 子模块不齐备"
+          }
+          # 单文件版按设计不含内核：kernel selftest 会明确报"找不到 opencode.exe"，
+          # 这是预期结果，**不作为失败**（退出码非 0 也接受），只打印出来供核对。
+          Invoke-Frozen -Exe $exe -CmdArgs @('kernel','selftest') | Out-Null
           exit 0
         shell: pwsh
 
