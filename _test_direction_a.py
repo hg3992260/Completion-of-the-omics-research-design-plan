@@ -55,7 +55,7 @@ EXPECTED_HOST_TOOL = "radiomics_workbench_list_stages"
 def step1_host_endpoint() -> str | None:
     hr("[1] 宿主进程内起 MCP HTTP 端点")
     n = mcp_server.tool_count()
-    record("已注册工具数", "OK" if n == 21 else "WARN", f"{n} 个")
+    record("已注册工具数", "OK" if n >= 21 else "WARN", f"{n} 个")
     r = mcp_server.serve_http_in_thread()
     if not r.get("ok"):
         record("起 MCP 端点", "FAIL", str(r.get("error")))

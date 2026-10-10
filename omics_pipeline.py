@@ -32,6 +32,7 @@ from stages_data import STAGES
 from ui_kit import (PAL, C, UI_FONT, MONO_FONT, mk_label, clear_layout,
                     text_height, ProgressBar, status_key, CreditBar,
                     WorkScroll, screen_size)
+import skeuo_kit                     # 高对比拟物三维皮肤（PCL_SKEUO=0 可关闭）
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 from app_paths import resource_path, data_path
@@ -747,6 +748,8 @@ def main(argv):
     app = QApplication(argv)
     set_color_theme(THEME_PATH)
     set_appearance_mode("light")     # 默认浅色，深色为亮橙科技配色
+    # 高对比拟物三维皮肤：换主题（须在建控件之前）+ 换调色板 + 套控件皮肤
+    skeuo_kit.install_if_enabled(theme_path=resource_path("theme_skeuo.json"))
     win = MainWindow()
 
     if "--shot" in argv:

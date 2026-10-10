@@ -1,0 +1,96 @@
+{
+  "_comment": "skeuo_kit companion theme: high contrast + skeuomorphic 3D. Same values as skeuo_kit.PAL_HC.",
+  "_usage": "set_color_theme('theme_skeuo.json') then skeuo_kit.install(ui_kit)",
+  "_note": "ASCII only: PyCt6 loads theme JSON with the system codec (GBK here), so non-ASCII would break load_theme().",
+
+  "CButton": {
+    "corner_radius": 8,
+    "border_width": 0,
+    "background_color": ["rgb(10, 107, 180)", "rgb(255, 138, 42)"],
+    "text_color": ["rgb(255, 255, 255)", "rgb(26, 13, 2)"],
+    "border_color": ["rgb(127, 168, 202)", "rgb(107, 74, 30)"],
+    "hover_color": ["rgb(8, 92, 156)", "rgb(255, 164, 82)"],
+    "pressed_color": ["rgb(6, 72, 124)", "rgb(206, 95, 12)"],
+    "disabled_background_color": ["rgba(10, 107, 180, 0.42)", "rgba(255, 138, 42, 0.32)"],
+    "disabled_text_color": ["rgba(255, 255, 255, 0.62)", "rgba(26, 13, 2, 0.55)"]
+  },
+
+  "CComboBox": {
+    "corner_radius": 8,
+    "border_width": 1,
+    "menu_border_width": 1,
+    "item_border_width": 0,
+    "background_color": ["rgb(241, 246, 251)", "rgb(17, 19, 24)"],
+    "text_color": ["rgb(10, 22, 38)", "rgb(243, 245, 249)"],
+    "border_color": ["rgb(167, 191, 215)", "rgb(59, 66, 76)"],
+    "hover_color": ["rgb(231, 240, 250)", "rgb(44, 49, 58)"],
+    "menu_background_color": ["rgb(255, 255, 255)", "rgb(36, 41, 50)"],
+    "menu_border_color": ["rgb(167, 191, 215)", "rgb(74, 83, 97)"],
+    "item_background_color": ["rgb(255, 255, 255)", "rgb(36, 41, 50)"],
+    "item_text_color": ["rgb(10, 22, 38)", "rgb(243, 245, 249)"],
+    "item_border_color": ["rgb(167, 191, 215)", "rgb(59, 66, 76)"],
+    "item_hover_color": ["rgb(207, 229, 248)", "rgb(74, 52, 24)"],
+    "disabled_background_color": ["rgba(241, 246, 251, 0.5)", "rgba(17, 19, 24, 0.5)"],
+    "disabled_text_color": ["rgba(10, 22, 38, 0.45)", "rgba(243, 245, 249, 0.45)"]
+  },
+
+  "CFrame": {
+    "corner_radius": 12,
+    "border_width": 1,
+    "border_color": ["rgb(167, 191, 215)", "rgb(59, 66, 76)"],
+    "background_color": ["rgb(255, 255, 255)", "rgb(27, 30, 37)"]
+  },
+
+  "CLabel": {
+    "corner_radius": 6,
+    "border_width": 0,
+    "text_color": ["rgb(10, 22, 38)", "rgb(243, 245, 249)"],
+    "disabled_text_color": ["rgba(10, 22, 38, 0.45)", "rgba(243, 245, 249, 0.45)"]
+  },
+
+  "CLineEdit": {
+    "corner_radius": 8,
+    "border_width": 1,
+    "background_color": ["rgb(241, 246, 251)", "rgb(17, 19, 24)"],
+    "text_color": ["rgb(10, 22, 38)", "rgb(243, 245, 249)"],
+    "placeholder_text_color": ["rgb(76, 96, 118)", "rgb(170, 178, 190)"],
+    "border_color": ["rgb(167, 191, 215)", "rgb(59, 66, 76)"],
+    "disabled_background_color": ["rgba(241, 246, 251, 0.5)", "rgba(17, 19, 24, 0.5)"],
+    "disabled_text_color": ["rgba(10, 22, 38, 0.45)", "rgba(243, 245, 249, 0.45)"]
+  },
+
+  "CScrollBar": {
+    "corner_radius": 6,
+    "width": 12,
+    "background_color": ["rgb(198, 214, 230)", "rgb(74, 82, 94)"],
+    "hover_color": ["rgb(255, 255, 255)", "rgb(90, 100, 114)"],
+    "pressed_color": ["rgb(180, 201, 220)", "rgb(58, 66, 76)"]
+  },
+
+  "CSlider": {
+    "corner_radius": 3,
+    "border_width": 0,
+    "button_corner_radius": 7,
+    "button_border_width": 0,
+    "background_color": ["rgb(195, 212, 229)", "rgb(18, 21, 26)"],
+    "border_color": ["rgb(147, 170, 192)", "rgb(42, 47, 55)"],
+    "progress_color": ["rgb(10, 107, 180)", "rgb(255, 138, 42)"],
+    "button_background_color": ["rgb(234, 241, 249)", "rgb(61, 68, 78)"],
+    "button_border_color": ["rgb(167, 191, 215)", "rgb(42, 47, 55)"],
+    "button_hover_color": ["rgb(255, 255, 255)", "rgb(90, 100, 114)"],
+    "button_pressed_color": ["rgb(207, 222, 238)", "rgb(23, 26, 31)"],
+    "disabled_background_color": ["rgba(195, 212, 229, 0.5)", "rgba(18, 21, 26, 0.5)"],
+    "disabled_button_background_color": ["rgba(234, 241, 249, 0.5)", "rgba(61, 68, 78, 0.5)"]
+  },
+
+  "CTextEdit": {
+    "corner_radius": 10,
+    "border_width": 1,
+    "background_color": ["rgb(241, 246, 251)", "rgb(17, 19, 24)"],
+    "text_color": ["rgb(10, 22, 38)", "rgb(243, 245, 249)"],
+    "placeholder_text_color": ["rgb(76, 96, 118)", "rgb(170, 178, 190)"],
+    "border_color": ["rgb(167, 191, 215)", "rgb(59, 66, 76)"],
+    "disabled_background_color": ["rgba(241, 246, 251, 0.5)", "rgba(17, 19, 24, 0.5)"],
+    "disabled_text_color": ["rgba(10, 22, 38, 0.45)", "rgba(243, 245, 249, 0.45)"]
+  }
+}

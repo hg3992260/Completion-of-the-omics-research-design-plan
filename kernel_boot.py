@@ -33,6 +33,12 @@ import sys
 import threading
 import time
 
+# GBK 控制台下 print("↔") 等字符会抛 UnicodeEncodeError，离线自检会中途中止。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                                                       # noqa: BLE001
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -116,10 +122,12 @@ class KernelBoot:
         self._lock = threading.RLock()
         self._client: kc.KernelClient | None = None
         self._tui: subprocess.Popen | None = None
+        self._tui_pid: int | None = None
         self._mcp_url: str | None = None
         self._project: str | None = None
         self._log: list[str] = []
         self._exe = exe
+        self._driver = None
 
     # ---------------------------------------------------------------- 日志
 
@@ -189,6 +197,12 @@ class KernelBoot:
             self._say(f"隔离 home = {kc.kernel_home()}")
             self._say(f"可执行文件 = {self._exe or kc.opencode_exe() or '(未找到)'}")
             try:
+                assets = kcfg.install_builtin_assets()
+                if assets.get("installed"):
+                    self._say(f"已安装随包 agent/skill：{len(assets['installed'])} 项")
+            except Exception as e:                                     # noqa: BLE001
+                self._say(f"安装随包资产失败（忽略）：{type(e).__name__}: {e}")
+            try:
                 self._client = self._client or kc.KernelClient(exe=self._exe or kc.opencode_exe())
                 if not self._client.exe:
                     out["error"] = (
@@ -228,6 +242,7 @@ class KernelBoot:
                     self._spawn_tui(sid)
                 else:
                     self._say("已设 PCL_KERNEL_TUI=0，不打开终端界面")
+                self._reap_extra_attach()      # 清掉上次遗留 / 多余的终端窗口
 
                 out.update({"ok": True, "url": state.url, "sessionID": sid,
                             "mcp": self._mcp_url})
@@ -251,24 +266,122 @@ class KernelBoot:
                 except Exception as e:                                 # noqa: BLE001
                     self._say(f"停止内核失败：{type(e).__name__}: {e}")
 
+    def _tui_alive(self) -> bool:
+        """TUI 是否仍在运行：Windows 用 Popen 句柄；macOS/Linux 用发现的 attach pid。"""
+        if self._tui_pid and kc.KernelClient._pid_alive(self._tui_pid):
+            return True
+        return self._tui is not None and self._tui.poll() is None
+
+    def _discover_tui_pid(self, session_id: str | None, timeout: float = 6.0) -> int | None:
+        """macOS/Linux：osascript/终端句柄不持久，用 `ps` 找到真正的 `opencode attach` pid。"""
+        exe = (self._client.exe if self._client else "") or ""
+        if not exe:
+            return None
+        exe_name = os.path.basename(exe) or "opencode"
+        kernel_pid = self._client.state.pid if (self._client and self._client.state) else None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for p in kc.list_processes(exe_name):
+                cmd = (p.get("cmd") or "").lower()
+                if p["pid"] == kernel_pid or "attach" not in cmd:
+                    continue
+                if session_id and "--session" in cmd and session_id.lower() not in cmd:
+                    continue
+                return p["pid"]
+            time.sleep(0.4)
+        return None
+
     def _kill_tui(self) -> None:
-        if self._tui and self._tui.poll() is None:
-            try:
-                self._tui.terminate()
-            except Exception:                                          # noqa: BLE001
-                pass
+        # 树杀/强杀：只 terminate 父进程会留下孤儿窗口（Windows PowerShell / macOS Terminal）
+        for pid in (self._tui_pid, self._tui.pid if self._tui else None):
+            if pid and kc.KernelClient._pid_alive(pid):
+                try:
+                    kc.KernelClient._kill(pid)
+                except Exception:                                      # noqa: BLE001
+                    pass
         self._tui = None
+        self._tui_pid = None
+
+    def _reap_extra_attach(self) -> int:
+        """只保留「内核进程 + 当前 TUI」，其余本程序同源的 opencode attach 窗口自动关闭。
+
+        不碰用户自己安装的 opencode（exe 路径不同）。
+        """
+        try:
+            exe = (self._client.exe if self._client else "") or ""
+            if not exe:
+                return 0
+            keep = set()
+            if self._client and self._client.state:
+                keep.add(self._client.state.pid)
+            if self._tui_pid:
+                keep.add(self._tui_pid)
+            if self._tui and self._tui.poll() is None:
+                keep.add(self._tui.pid)
+            exe_l = exe.lower()
+            exe_name = os.path.basename(exe) or "opencode.exe"
+            killed = 0
+            for p in kc.list_processes(exe_name):
+                if p.get("pid") in keep:
+                    continue
+                blob = ((p.get("exe") or "") + " " + (p.get("cmd") or "")).lower()
+                if exe_l not in blob:
+                    continue                       # 不是我们这份 opencode，别动
+                if "attach" in (p.get("cmd") or "").lower():
+                    try:
+                        kc.KernelClient._kill(p["pid"])
+                        killed += 1
+                    except Exception:                                  # noqa: BLE001
+                        pass
+            if killed:
+                self._say(f"已自动清理 {killed} 个无关的 opencode 终端窗口")
+            return killed
+        except Exception:                                              # noqa: BLE001
+            return 0
+
+    def _toast_tui(self, message: str, variant: str = "success") -> None:
+        """在 TUI 里弹一条 toast（失败静默，不影响主流程）。"""
+        try:
+            if self._client:
+                self._client.tui_show_toast(message, variant=variant)
+        except Exception:                                              # noqa: BLE001
+            pass
+
+    def _ensure_tui(self, session_id: str | None, label: str | None = None) -> None:
+        """保证有且仅有一个 TUI：已在运行则让它**内部切到**目标 session，不重开窗口。"""
+        if not self._client:
+            return
+        if self._tui_alive() and session_id:
+            try:
+                self._client.tui_select_session(session_id)
+                self._say(f"TUI 已切换到 session {session_id}（复用同一窗口）")
+                self._toast_tui(f"已切换课题：{label}" if label
+                                else f"已切换到会话 {session_id}")
+                self._reap_extra_attach()
+                return
+            except Exception as e:                                     # noqa: BLE001
+                self._say(f"TUI 切换会话失败，改为重开：{type(e).__name__}: {e}")
+        self._spawn_tui(session_id)
 
     def _spawn_tui(self, session_id: str | None) -> None:
         if not self._client:
             return
-        self._kill_tui()                     # 同一时刻只保留一个内核 TUI 窗口
+        self._kill_tui()                     # 先收掉上一次的 TUI（树杀）
         try:
-            self._tui = self._client.spawn_tui(session_id=session_id)
+            # 直接 spawn opencode attach（不经 powershell）：一个进程=一个终端，
+            # 既能被 _tui 句柄精确回收，也能被 _reap_extra_attach 识别清理。
+            # macOS 走 osascript → Terminal.app（句柄不持久，靠 _discover_tui_pid 找 pid）。
+            self._tui = self._client.spawn_tui(session_id=session_id,
+                                               via_powershell=False)
+            if os.name == "nt":
+                self._tui_pid = self._tui.pid if self._tui else None
+            else:
+                self._tui_pid = self._discover_tui_pid(session_id)
             self._say("已在新终端窗口打开内核界面"
                       + (f"（session {session_id}）" if session_id else ""))
         except Exception as e:                                         # noqa: BLE001
             self._say(f"打开内核终端失败：{type(e).__name__}: {e}")
+        self._reap_extra_attach()            # 只留最新这一个
 
     # ------------------------------------------------ 项目 ↔ 会话（要求 3）
 
@@ -287,8 +400,15 @@ class KernelBoot:
             else:
                 if known:
                     self._say(f"项目「{name}」的原 session {known} 已不存在，新建一个")
-                got = self._client.new_session(title=name)
-                sid = (got.get("data") or got).get("id") if isinstance(got, dict) else None
+                # 用 legacy `POST /session` 建会话：V2 建出的 session 走 V1 prompt
+                # 不一定被接受，而 legacy 会话与方向 B 的 legacy 投递同源（见 kernel_driver）。
+                model = (kcfg.read_config() or {}).get("model")
+                try:
+                    got = self._client.create_session(title=name, model=model)
+                    sid = (got or {}).get("id")
+                except Exception:                                      # noqa: BLE001
+                    got = self._client.new_session(title=name)
+                    sid = (got.get("data") or got).get("id") if isinstance(got, dict) else None
                 if not sid:
                     raise kc.KernelError(f"新建 session 失败：{got}")
                 kcfg.bind_project_session(name, sid, title=name)
@@ -297,7 +417,7 @@ class KernelBoot:
 
             self._project = name
             if relaunch_tui:
-                self._spawn_tui(sid)
+                self._ensure_tui(sid, label=name)
             return {"project": name, "sessionID": sid, "created": created}
 
     def switch_project(self, project_name: str) -> dict:
@@ -311,6 +431,60 @@ class KernelBoot:
             self._say(f"切项目联动失败：{type(e).__name__}: {e}")
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
+    # --------------------------------------------------- 方向 B 驱动（GUI 用）
+
+    def driver(self):
+        """返回方向 B 驱动（惰性创建），供 GUI 把任务投给 opencode。
+
+        未启用内核（跳过联动）时返回 None，调用方据此回落到宿主自身流程。
+        """
+        with self._lock:
+            if self._client is None or not self._client.state:
+                return None
+            if self._driver is None:
+                import kernel_driver as _kd
+                self._driver = _kd.KernelDriver(self._client)
+            return self._driver
+
+    def run_task(self, project_name: str, text: str, on_event=None,
+                 timeout: float = 900.0):
+        """把一段任务投给该项目的 session（确保 session 存在后投递）。
+
+        返回事件列表；未启用内核返回 None。
+        """
+        drv = self.driver()
+        if drv is None:
+            return None
+        r = self.ensure_project_session(project_name, relaunch_tui=False)
+        sid = r["sessionID"]
+        model = (kcfg.read_config() or {}).get("model")
+        return drv.run_turn(sid, text, on_event=on_event, timeout=timeout, model=model)
+
+    def rename_project(self, old_name: str, new_name: str) -> dict:
+        """课题改名联动：迁移 session 绑定并让终端跟到**同一个** session（不新建）。"""
+        try:
+            entry = kcfg.rename_project_session(old_name, new_name)
+            if not entry:
+                self._say(f"改名：课题「{old_name}」无 session 绑定，跳过")
+                return {"ok": True, "migrated": False}
+            sid = entry.get("sessionID")
+            self._say(f"课题改名：{old_name} → {new_name}（沿用 session {sid}）")
+            try:
+                self._client.update_session_title(sid, new_name)
+                self._say(f"已更新 opencode 会话标题 → {new_name}")
+            except Exception as e:                                     # noqa: BLE001
+                self._say(f"更新会话标题失败（忽略）：{type(e).__name__}: {e}")
+            if self._project == old_name:
+                self._project = new_name
+                try:
+                    self._ensure_tui(sid, label=new_name)
+                except Exception as e:                                 # noqa: BLE001
+                    self._say(f"改名后重挂终端失败：{type(e).__name__}: {e}")
+            return {"ok": True, "migrated": True, "sessionID": sid}
+        except Exception as e:                                         # noqa: BLE001
+            self._say(f"改名联动失败：{type(e).__name__}: {e}")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
     # ---------------------------------------------------------------- 状态
 
     def status(self) -> dict:
@@ -319,7 +493,9 @@ class KernelBoot:
             "ready_seconds": self._client.ready_seconds if self._client else None,
             "mcp_url": self._mcp_url,
             "project": self._project,
-            "tui_pid": self._tui.pid if (self._tui and self._tui.poll() is None) else None,
+            "tui_pid": (self._tui_pid if self._tui_pid
+                        else (self._tui.pid if (self._tui and self._tui.poll() is None) else None))
+                       if self._tui_alive() else None,
             "projects": kcfg.read_projects_map(),
             "autostart": autostart_enabled(),
             "tui_enabled": tui_enabled(),

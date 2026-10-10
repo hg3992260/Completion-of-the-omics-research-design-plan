@@ -20,7 +20,7 @@ APP_NAME = "PCLRadiomics"
 # v2.1.0 = GUI 启动即联动内嵌 opencode 内核 + 项目↔session 绑定
 # v2.0.0 = 首次内嵌 opencode 内核（session/skill/apikey 控制台配置 +
 #          21 个领域工具通过 MCP 暴露给内核），见 opencode-embedding-plan.md
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 
 def is_frozen() -> bool:

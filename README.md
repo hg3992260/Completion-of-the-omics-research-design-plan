@@ -17,8 +17,21 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v2.1.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v2.2.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+### v2.2.0 · 内核联动可视化 + TUI 单窗口复用 + macOS 适配
+
+- **底部「MCP / 内核状态 + 操作日志」面板**（可点击缩放）：实时显示内核 URL/版本/pid、
+  项目 ↔ 会话、方向 A 的 MCP 端点与工具数；操作日志记录切阶段/切项目/改名/内核事件。
+- **只保留一个 opencode 终端**：切课题/改名/切会话都在**同一个终端窗口**内 `select-session` 切换，
+  并弹「已切换课题：X」提示；多余/残留窗口自动清理关闭（不碰用户自装的 opencode）。
+- **改名同步**：课题改名时沿用**同一 session**（迁移绑定）并同步更新 opencode 会话标题。
+- **macOS 适配**：`ps` 解析同源进程、TUI pid 跟踪（osascript 句柄不持久）、macOS spec 补
+  `kernel_driver` 与 `kernel_assets/`，并附 `macos_sign_kernel.sh`（内嵌二进制 JIT 签名 + 去 quarantine）。
+- **打包**：Windows `.zip` 与 macOS `.dmg` 由 GitHub Actions 在 tag `v*` 时自动构建并挂到 Release。
+
+> 详见 [`RELEASE_v2.2.0.md`](RELEASE_v2.2.0.md)。
 
 ### v2.1.0 · GUI 启动即联动内核 + 项目 ↔ 会话绑定
 

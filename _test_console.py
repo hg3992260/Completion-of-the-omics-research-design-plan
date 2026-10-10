@@ -1,65 +1,62 @@
 # -*- coding: utf-8 -*-
-"""模拟用户双击：图形模式下到底会不会弹出黑色控制台窗口。"""
-import ctypes
+"""自检：底部「MCP 状态 / 操作日志」可折叠面板的渲染与缩放。"""
 import os
-import subprocess
 import sys
-import time
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-APP_DIR = os.path.join(ROOT, "dist", "PCLRadiomics")
-EXE = os.path.join(APP_DIR, "PCLRadiomics.exe")
-OUT = os.path.join(ROOT, "_console_check.txt")
-lines = []
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                                                       # noqa: BLE001
+    pass
 
-u32 = ctypes.windll.user32
-k32 = ctypes.windll.kernel32
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ["PCL_KERNEL_AUTOSTART"] = "0"
+sys.argv = ["x", "--demo"]
 
+from PySide6.QtWidgets import QApplication                              # noqa: E402
+from PySide6 import QtCore                                              # noqa: E402
+import design_studio as ds                                              # noqa: E402
 
-def visible_windows():
-    out = []
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+os.makedirs("_shots", exist_ok=True)
+app = QApplication([])
+ds.set_color_theme(ds.THEME_PATH)
+ds.set_appearance_mode("light")
+win = ds.StudioWindow(demo=True)
+win._no_flush = True
+win.resize(1400, 900)
+win.show()
+for _ in range(3):
+    win.layout().activate()
+    QApplication.processEvents()
 
-    def cb(hwnd, _):
-        if not u32.IsWindowVisible(hwnd):
-            return True
-        cls = ctypes.create_unicode_buffer(256)
-        u32.GetClassNameW(hwnd, cls, 256)
-        title = ctypes.create_unicode_buffer(256)
-        u32.GetWindowTextW(hwnd, title, 256)
-        pid = ctypes.c_ulong()
-        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        out.append((cls.value, title.value.strip(), pid.value))
-        return True
-
-    u32.EnumWindows(WNDENUMPROC(cb), None)
-    return out
+ok = True
 
 
-before = visible_windows()
-consoles_before = [w for w in before if "Console" in w[0] or "Terminal" in w[0]]
-lines.append(f"启动前可见控制台/终端窗口：{len(consoles_before)} 个"
-             f" {[t or c for c, t, p in consoles_before][:4]}")
+def run():
+    global ok
+    try:
+        print("has console_log =", hasattr(win, "console_log"), flush=True)
+        win.gui_log("测试：UI 自检开始")
+        win.set_current(3)                      # 触发一条阶段切换日志
+        win.refresh_console()
+        head = win.console_head.label().text()
+        print("head =", head, flush=True)
+        win.toggle_console()                    # 展开
+        QApplication.processEvents()
+        win.grab().save("_shots/_console_open.png")
+        print("expanded visible =", win.console_body.isVisible(), flush=True)
+        ok = hasattr(win, "console_log") and win.console_body.isVisible()
+        win.toggle_console()                    # 折叠
+        QApplication.processEvents()
+        win.grab().save("_shots/_console_closed.png")
+        print("collapsed visible =", win.console_body.isVisible(), flush=True)
+        ok = ok and (not win.console_body.isVisible())
+    except Exception as e:                                          # noqa: BLE001
+        ok = False
+        print("EXC:", type(e).__name__, e, flush=True)
+    print("结论：" + ("通过" if ok else "未通过"), flush=True)
+    app.quit()
 
-# pythonw 方式启动（等价于双击，不继承本会话的控制台）
-subprocess.Popen([EXE, "gui"], cwd=APP_DIR,
-                 creationflags=0x00000008 | 0x08000000,   # DETACHED_PROCESS | CREATE_NO_WINDOW
-                 close_fds=True)
-time.sleep(16)
-after = visible_windows()
-new_windows = [w for w in after if w not in before]
-lines.append("启动后新增的可见窗口：")
-for c, t, p in new_windows:
-    lines.append(f"   class={c!r} title={t[:40]!r} pid={p}")
-consoles_after = [w for w in after if "Console" in w[0] or "Terminal" in w[0]]
-lines.append(f"启动后可见控制台/终端窗口：{len(consoles_after)} 个")
-lines.append("结论：" + ("没有多出控制台窗口 —— 图形模式干净"
-                     if len(consoles_after) <= len(consoles_before) else
-                     "多出了控制台窗口，需要改方案"))
 
-# 收尾：关掉刚启动的进程
-import json
-subprocess.run(["taskkill", "/F", "/IM", "PCLRadiomics.exe"],
-               capture_output=True)
-open(OUT, "w", encoding="utf-8").write("\n".join(lines))
-print("\n".join(lines))
+QtCore.QTimer.singleShot(800, run)
+app.exec()
+sys.exit(0 if ok else 1)

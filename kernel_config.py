@@ -360,6 +360,57 @@ def remove_skill(name: str) -> bool:
     return True
 
 
+# ------------------------------------------------------------------ 随包资产
+
+def _assets_root() -> str:
+    """随包自带的 agent/skill 模板目录（kernel_assets/）。"""
+    try:
+        from app_paths import resource_path
+        p = resource_path("kernel_assets")
+        if os.path.isdir(p):
+            return p
+    except Exception:                                                  # noqa: BLE001
+        pass
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernel_assets")
+
+
+def install_builtin_assets(force: bool = False) -> dict:
+    """把随包的 agent/skill 模板安装到隔离 home（幂等）。
+
+    - agent: kernel_assets/agent/*.md  → <config>/agent/
+    - skill: kernel_assets/skill/<name>/SKILL.md → <config>/skill/<name>/
+    默认不覆盖已有文件（force=True 才覆盖）。返回安装清单。
+    """
+    root = _assets_root()
+    p = paths()
+    installed: list[str] = []
+
+    adir = os.path.join(root, "agent")
+    if os.path.isdir(adir):
+        for fn in sorted(os.listdir(adir)):
+            if not fn.endswith(".md"):
+                continue
+            dst = os.path.join(p["agent_dir"], fn)
+            if force or not os.path.exists(dst):
+                shutil.copyfile(os.path.join(adir, fn), dst)
+                installed.append(dst)
+
+    sdir = os.path.join(root, "skill")
+    if os.path.isdir(sdir):
+        for name in sorted(os.listdir(sdir)):
+            src = os.path.join(sdir, name, "SKILL.md")
+            if not os.path.isfile(src):
+                continue
+            dst_dir = os.path.join(p["skill_dir"], name)
+            os.makedirs(dst_dir, exist_ok=True)
+            dst = os.path.join(dst_dir, "SKILL.md")
+            if force or not os.path.exists(dst):
+                shutil.copyfile(src, dst)
+                installed.append(dst)
+
+    return {"ok": True, "root": root, "installed": installed}
+
+
 # ------------------------------------------------------------------------- Agent
 
 def list_agents() -> list[dict]:
@@ -435,6 +486,24 @@ def unbind_project_session(project: str) -> bool:
     mapping.pop(project, None)
     write_projects_map(mapping)
     return True
+
+
+def rename_project_session(old_name: str, new_name: str) -> dict | None:
+    """课题改名时迁移「项目↔session」绑定 —— 同一个 session 继续用，不新建。
+
+    绑定以课题名为键；不改名迁移的话，新名字会被当成新课题而新建 session
+    （旧绑定还残留）。返回迁移后的条目，None 表示旧名没有绑定。
+    """
+    mapping = read_projects_map()
+    entry = mapping.pop(old_name, None)
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        entry["title"] = new_name
+        entry["renamed_from"] = old_name
+    mapping[new_name] = entry
+    write_projects_map(mapping)
+    return entry if isinstance(entry, dict) else {"sessionID": entry, "title": new_name}
 
 
 # --------------------------------------------------------------------------- 总览

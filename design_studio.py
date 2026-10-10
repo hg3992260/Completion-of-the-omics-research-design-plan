@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """组学研究设计工作台（主界面）
 
 流程：贴入初步实验设计 → agent 速读 → 按十阶段标准流程逐阶段「先追问 → 你回答 → 再给改写稿」
@@ -114,6 +114,7 @@ from ui_kit import (PAL, C, UI_FONT, MONO_FONT, mk_label, clear_layout,
                     ThinkingButton, screen_size,
                     Card, FlowStepper, draw_backdrop, CARD_PAD, install_button_skin,
                     pair_brush, CheckBox3D, RefitLabel)
+import skeuo_kit                     # 高对比拟物三维皮肤（PCL_SKEUO=0 可关闭）
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 from app_paths import resource_path, data_path
@@ -2502,6 +2503,8 @@ def make_flex(widget, min_w: int = 160, min_h: int = 60, vertical: str = "expand
 class StudioWindow(CMainWindow):
     #: 内核联动是后台线程跑的，结果必须 marshal 回 GUI 线程再动控件
     kernel_event = QtCore.Signal(str)
+    #: opencode 一轮任务结束（从工作线程发射，自动排队回 GUI 线程）
+    opencode_done = QtCore.Signal()
 
     def __init__(self, demo: bool = False):
         sw, sh, sx, sy = screen_size(1520, 960, 1180, 720)
@@ -2521,8 +2524,13 @@ class StudioWindow(CMainWindow):
         # 内嵌 opencode 内核联动（打开 GUI 即启动内核 + 弹终端 + 项目↔session 绑定）
         self._kboot = None
         self._kboot_ready = False
+        self._oc_busy = False
+        self._pending_question = None
+        self._oc_on_done = None
         self.kernel_event.connect(self._on_kernel_event)
+        self.opencode_done.connect(self._on_opencode_done)
         install_button_skin()          # 保证任何构造路径下按钮都有立体皮肤
+        skeuo_kit.install_if_enabled()  # 高对比拟物三维皮肤（覆盖上面这层弱渐变）
 
         root = QVBoxLayout()
         root.setContentsMargins(18, 16, 18, 10)
@@ -2551,6 +2559,7 @@ class StudioWindow(CMainWindow):
         self.body_stack.addWidget(self._build_mr_page())        # 4 手稿审阅
         root.addWidget(self.body_stack, 1)
 
+        root.addWidget(self._build_console())      # MCP 状态 + 操作日志（可点击缩放）
         root.addWidget(self._build_footer())
         root.addWidget(CreditBar(self))
         self.setLayout(root)
@@ -3229,6 +3238,112 @@ class StudioWindow(CMainWindow):
                               border_color=PAL["border"]))
         return col
 
+    # --------------------------------------------- MCP 状态 / 操作日志（可缩放）
+    def _build_console(self) -> CFrame:
+        """底部可折叠面板：左=内核/MCP 状态，右=操作日志。点标题按钮缩放。"""
+        f = CFrame(self, layout_type="vertical", border_width=0, corner_radius=0,
+                   background_color="none")
+        top = QWidget(f)
+        tl = QHBoxLayout(top)
+        tl.setContentsMargins(6, 0, 6, 0)
+        tl.setSpacing(10)
+        self.console_toggle = CButton(
+            master=top, text="▸ MCP / 内核状态", width=190, height=26,
+            font_family=UI_FONT, font_size=9, command=self.toggle_console,
+            background_color=PAL["btn"], text_color=PAL["text"],
+            hover_color=PAL["btn_hover"], border_color=PAL["border"])
+        self.console_toggle.setFixedWidth(190)
+        tl.addWidget(self.console_toggle)
+        self.console_head = mk_label(top, "内核未启动", size=9, width_px=1000,
+                                     wrap=False, color=PAL["muted"])
+        tl.addWidget(self.console_head, 1)
+        f.layout().addWidget(top)
+
+        self.console_body = CFrame(f, layout_type="horizontal", border_width=0,
+                                   corner_radius=0, background_color="none")
+        bl = self.console_body.layout()
+        bl.setContentsMargins(8, 0, 8, 8)
+        bl.setSpacing(10)
+        self.console_mcp = mk_label(self.console_body, "", size=9, width_px=330,
+                                    color=PAL["muted"], wrap=False)
+        bl.addWidget(self.console_mcp, 0)
+        self.console_log = QtWidgets.QPlainTextEdit(self.console_body)
+        self.console_log.setReadOnly(True)
+        self.console_log.setFixedHeight(190)
+        try:
+            self.console_log.setStyleSheet(
+                "QPlainTextEdit { background:%s; color:%s; border:1px solid %s;"
+                " border-radius:6px; font-size:10px; }"
+                % (C("surface2"), C("text"), C("border")))
+        except Exception:                                              # noqa: BLE001
+            pass
+        bl.addWidget(self.console_log, 1)
+        self.console_body.setVisible(False)
+        f.layout().addWidget(self.console_body)
+
+        self._console_expanded = False
+        try:
+            self._console_timer = QtCore.QTimer(self)
+            self._console_timer.timeout.connect(self.refresh_console)
+            self._console_timer.start(5000)
+        except Exception:                                              # noqa: BLE001
+            self._console_timer = None
+        return f
+
+    def toggle_console(self):
+        self._console_expanded = not getattr(self, "_console_expanded", False)
+        self.console_body.setVisible(self._console_expanded)
+        label = ("▾ " if self._console_expanded else "▸ ") + "MCP / 内核状态"
+        try:
+            self.console_toggle.button().setText(label)
+        except Exception:                                              # noqa: BLE001
+            try:
+                self.console_toggle.setText(label)
+            except Exception:                                          # noqa: BLE001
+                pass
+        if self._console_expanded:
+            self.refresh_console()
+
+    def refresh_console(self):
+        """刷新 MCP/内核状态摘要（由定时器与事件触发，不动后台线程）。"""
+        if not hasattr(self, "console_mcp"):
+            return
+        try:
+            import mcp_server
+            st = mcp_server.http_status() or {}
+            n = mcp_server.tool_count()
+            mcp = f"MCP：{st.get('url') or '未启动'} · {n} 工具"
+        except Exception as e:                                         # noqa: BLE001
+            mcp = f"MCP：不可用（{type(e).__name__}）"
+        kmode = self._driver_mode()
+        kern = "内核：未启动"
+        if self._kboot is not None and self._kboot_ready:
+            try:
+                s = self._kboot.status() or {}
+                k = s.get("kernel") or {}
+                port = k.get("port")
+                kern = (f"内核：{'http://127.0.0.1:%s' % port if port else '—'}"
+                        f" v{k.get('version') or '?'} pid={k.get('pid')}"
+                        f" · 项目 {s.get('project') or '—'}")
+            except Exception:                                          # noqa: BLE001
+                kern = "内核：已启动"
+        head = f"驱动={kmode} · {kern} · {mcp}"
+        try:
+            self.console_head.label().setText(head if len(head) <= 160 else head[:157] + "…")
+            self.console_mcp.label().setText(mcp + "\n" + kern)
+        except Exception:                                              # noqa: BLE001
+            pass
+
+    def gui_log(self, text: str):
+        """把一条 GUI 操作写入操作日志面板。"""
+        box = getattr(self, "console_log", None)
+        if box is None:
+            return
+        try:
+            box.appendPlainText(f"{time.strftime('%H:%M:%S')}  {text}")
+        except Exception:                                              # noqa: BLE001
+            pass
+
     # ---------------------------------------------------------------- 底部
     def _build_footer(self) -> CFrame:
         f = CFrame(self, layout_type="horizontal", border_width=0, corner_radius=0,
@@ -3459,6 +3574,7 @@ class StudioWindow(CMainWindow):
         self._cur = max(0, min(len(STAGES) - 1, idx))
         self._refresh_rail()
         self._update_status()
+        self.gui_log(f"切换到阶段 {self._cur + 1}/10 · {STAGES[self._cur]['title']}")
 
     def _busy(self) -> bool:
         return self.thread is not None and self.thread.isRunning()
@@ -3491,6 +3607,7 @@ class StudioWindow(CMainWindow):
     #  也不走 _busy() 的单槽守卫（那是给一次性 LLM 调用设计的）。
     def _on_kernel_event(self, text: str):
         """后台线程的内核消息回到 GUI 线程（Qt 信号已保证线程正确）。"""
+        self.gui_log("[内核] " + text)
         try:
             box = getattr(self, "transcript", None)
             if box is not None:
@@ -3570,6 +3687,135 @@ class StudioWindow(CMainWindow):
             except Exception:                                          # noqa: BLE001
                 pass
 
+    # --------------------------------------- opencode 驱动（PCL_DRIVER=opencode）
+    #
+    #  默认 host：GUI 走自身 LLM 流程，行为与 v2.1 完全一致。
+    #  opencode：智能动作改为向内核投递任务（方向 B），内核调用宿主 21 个 MCP
+    #  工具写回项目；问答经 question 工具就地回灌。见 opencode-embedding-plan.md。
+    #  这是**新增的可选路径**，默认不进入，故不影响既有自动化与自检。
+
+    def _driver_mode(self) -> str:
+        return (os.environ.get("PCL_DRIVER") or "host").strip().lower()
+
+    def opencode_available(self) -> bool:
+        return (self._driver_mode() == "opencode"
+                and self._kboot is not None and self._kboot_ready)
+
+    def opencode_run_task(self, text: str, on_done=None) -> None:
+        """把一段任务投给 opencode；事件镜像到对话区，完成时重载当前项目。"""
+        if self._kboot is None or self._kboot.driver() is None:
+            self.kernel_event.emit("opencode 驱动不可用（内核未启动？）")
+            return
+        if self._oc_busy:
+            self._toast("opencode 正在执行上一任务")
+            return
+        self._oc_busy = True
+        self._oc_on_done = on_done
+        drv = self._kboot.driver()
+
+        def handle(ev: dict):
+            k = ev.get("kind")
+            if k in ("text", "text_full"):
+                self.kernel_event.emit(ev.get("text") or "")
+            elif k == "tool":
+                self.kernel_event.emit(f"[opencode·{ev.get('text')}]")
+            elif k == "question":
+                self._pending_question = ev.get("data") or {}
+                qs = (self._pending_question.get("questions") or [{}])[0]
+                self.kernel_event.emit(
+                    f"opencode 提问（{qs.get('header', '')}）：{qs.get('question', '')}"
+                    "　→ 请在下方回答后点主按钮提交")
+            elif k == "permission":
+                try:                       # 默认放行一次，避免会话挂死
+                    drv.answer_permission((ev.get("data") or {}).get("id"), "once")
+                except Exception:                                  # noqa: BLE001
+                    pass
+            elif k == "error":
+                self.kernel_event.emit(f"opencode 错误：{ev.get('text')}")
+
+        def worker():
+            try:
+                out = self._kboot.run_task(self.project.name, text, on_event=handle)
+                if out is None:
+                    self.kernel_event.emit("opencode 未启用或内核不可用")
+            except Exception as e:                                     # noqa: BLE001
+                self.kernel_event.emit(f"opencode 执行失败：{type(e).__name__}: {e}")
+            finally:
+                self.opencode_done.emit()          # 跨线程 marshal 回 GUI 线程
+
+        threading.Thread(target=worker, name="opencode-task", daemon=True).start()
+
+    def opencode_submit_answers(self, values: list) -> None:
+        """把 GUI 就地输入的回答回灌给 opencode 待决问题（question 工具）。"""
+        q = self._pending_question
+        if not q or self._kboot is None or self._kboot.driver() is None:
+            return
+        try:
+            self._kboot.driver().answer_question(q.get("id"), [[v] for v in values])
+            self._pending_question = None
+            self.kernel_event.emit("已把回答回灌给 opencode")
+        except Exception as e:                                         # noqa: BLE001
+            self.kernel_event.emit(f"回灌失败：{type(e).__name__}: {e}")
+
+    def _kernel_rename_project(self, old_name: str, new_name: str) -> None:
+        """课题改名时让 opencode 沿用同一 session（迁移绑定 + 重挂终端）。"""
+        if self._kboot is None or not self._kboot_ready:
+            return
+        try:
+            self._kboot.rename_project(old_name, new_name)
+        except Exception as e:                                         # noqa: BLE001
+            self.kernel_event.emit(f"课题改名联动失败：{type(e).__name__}: {e}")
+
+    def _reload_current_project(self) -> None:
+        """重载盘上项目（opencode 的 MCP 工具写的是同一份 JSON）。"""
+        try:
+            path = getattr(self.project, "path", "") or getattr(self.project, "path_", "")
+            if path and os.path.exists(path):
+                self.project = Project.load(path)
+                self.agent = DesignAgent(self.client, self.project)
+                self._refresh_all()
+        except Exception as e:                                         # noqa: BLE001
+            self.kernel_event.emit(f"重载项目失败：{type(e).__name__}: {e}")
+
+    def _opencode_primary(self) -> None:
+        """opencode 模式下主按钮的派发（与 primary_action 的相位对应）。"""
+        phase = self.phase
+        if phase == "raw":
+            raw = self.raw_box.text_edit().toPlainText().strip()
+            if len(raw) < 20:
+                self._toast("请先贴入初步实验设计描述（至少 20 字）")
+                return
+            self.project.raw_design = raw
+            self.save_project()
+            self.opencode_run_task(
+                f"课题「{self.project.name}」的研究设想如下：\n{raw}\n\n"
+                "请按本程序的十阶段研究设计流程推进第一阶段：先调用 design_ask 工具"
+                "（stage=1, raw_design=上面的设想）获得现状评估与「必须澄清」的问题，"
+                "然后用 question 工具把这些澄清问题逐条问我。",
+                on_done=None)
+        elif phase == "answer":
+            vals = [self._answer_text(e) for e in self.answer_rows]
+            self.opencode_submit_answers(vals)
+        else:
+            idx = self.current_index()
+            self.opencode_run_task(
+                f"请推进课题「{self.project.name}」的阶段 {STAGES[idx]['id']}"
+                f"（{STAGES[idx]['title']}）：先 project_get_stage 读取现状；"
+                "若需要澄清，调用 design_ask 并用 question 工具问我；"
+                "再调用 design_rewrite 生成改写稿；完成后 project_set_stage 写回。",
+                on_done=None)
+
+    def _on_opencode_done(self) -> None:
+        """opencode 一轮结束（GUI 线程）：复位忙标志、重载项目、执行回调。"""
+        self._oc_busy = False
+        self._reload_current_project()
+        cb = self._oc_on_done
+        self._oc_on_done = None
+        if cb:
+            cb()
+        else:
+            self._toast("opencode 已完成本步")
+
     def _on_project_pick(self, name: str):
         if not name or name == self.project.name:
             return
@@ -3644,6 +3890,7 @@ class StudioWindow(CMainWindow):
         # 内核联动（课题 → opencode session）：切到哪个课题，就新建/切到它的 session，
         # 并让那个终端里的 opencode 界面跟过去（用户澄清的架构要求之一）
         self.kernel_switch_project(project.name)
+        self.gui_log(f"切换项目 → {project.name}")
 
     # ---------------------------------------------------------------- 课题 ⇄ 手稿联动
     def _sync_mr_to_project(self, project, announce: bool = True) -> None:
@@ -3708,8 +3955,11 @@ class StudioWindow(CMainWindow):
 
     def rename_project_file(self, path: str, new_name: str):
         if os.path.abspath(path) == os.path.abspath(self.project.path):
+            old = self.project.name
             self.project.rename(new_name)
             self._refresh_all()
+            self._kernel_rename_project(old, self.project.name)
+            self.gui_log(f"重命名课题「{old}」→「{self.project.name}」")
             self._toast(f"已重命名为「{self.project.name}」")
             return
         proj = Project.load(path)
@@ -3747,6 +3997,8 @@ class StudioWindow(CMainWindow):
         self.project.rename(new_name)               # 内部处理文件移动与重名后缀
         self._refresh_all()
         self._sync_project_box()
+        self._kernel_rename_project(old, self.project.name)   # opencode session 沿用改名
+        self.gui_log(f"重命名课题「{old}」→「{self.project.name}」")
         self._toast(f"「{old}」已改名为「{self.project.name}」")
 
     def delete_current_project(self):
@@ -4074,6 +4326,9 @@ class StudioWindow(CMainWindow):
 
     # ---------------------------------------------------------------- 主流程
     def primary_action(self):
+        if self.opencode_available():
+            self._opencode_primary()
+            return
         if self.phase == "raw":
             self.start_analysis()
         elif self.phase in ("answer",):
@@ -4662,6 +4917,9 @@ def main(argv):
     set_appearance_mode("light")     # 默认浅色，深色为亮橙科技配色
     app.setWindowIcon(QtGui.QIcon(ICON_PATH))     # 任务栏 / Alt-Tab 图标
     install_button_skin()            # 给按钮套立体皮肤（渐变面 + 上亮下暗倒角）
+    # 高对比拟物三维皮肤：换 PyCt6 主题（必须在建控件之前）+ 换调色板 + 套控件皮肤。
+    # PCL_SKEUO=0 可整体关掉，回到改动前的外观。
+    skeuo_kit.install_if_enabled(theme_path=resource_path("theme_skeuo.json"))
 
     splash = None
     if SHOW_SPLASH and not any(a in argv for a in ("--shot", "--e2e", "--demo")):
@@ -4828,3 +5086,4 @@ if __name__ == "__main__":
         _die(f"{type(_e).__name__}: {_e}", _tb.format_exc())
     else:
         sys.exit(_rc)
+

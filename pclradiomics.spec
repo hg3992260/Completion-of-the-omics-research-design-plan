@@ -39,6 +39,10 @@ datas += collect_data_files("certifi")     # HTTPS 根证书（冻结后 Windows
 datas += collect_data_files("PyCt6")       # PyCt6 自带主题 JSON，缺了界面会静默退出
 datas += collect_data_files("mcp")
 datas += collect_data_files("docx")   # python-docx 的默认模板 templates/default.docx 必须一起打包，否则导出 Word 会失败
+# 随包 agent/skill 模板（kernel_config.install_builtin_assets 会装到隔离 home）
+_KERNEL_ASSETS = os.path.join(ROOT, "kernel_assets")
+if os.path.isdir(_KERNEL_ASSETS):
+    datas.append((_KERNEL_ASSETS, "kernel_assets"))
 
 # —— 内嵌 opencode 内核二进制（172 MB）——
 # 为何不入库：GitHub 单文件硬上限 100 MB。故由构建期获取；本 spec 自带获取逻辑，
@@ -80,7 +84,7 @@ elif SKIP_KERNEL:
 HIDDEN = ["app_paths", "stages_data", "llm_client", "design_agent",
           "mcp_server", "api_server", "cli", "ui_kit", "design_studio", "omics_pipeline",
           "win_stdio", "docx_export", "manuscript_review",
-          "kernel_client", "kernel_config", "kernel_cli", "kernel_boot"]
+          "kernel_client", "kernel_config", "kernel_cli", "kernel_boot", "kernel_driver"]
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi",
             "h11", "PyCt6"):
@@ -115,7 +119,8 @@ HIDDEN += _collect_local(("manuscript_review",))
 #    任何一个导入失败都说明它自己或它依赖的本地模块没被收集，直接中止而不是产出坏包。
 _probe_fail = []
 for _m in ("design_studio", "omics_pipeline", "manuscript_review", "docx_export",
-           "mcp_server", "api_server", "kernel_client", "kernel_config", "kernel_cli"):
+           "mcp_server", "api_server", "kernel_client", "kernel_config", "kernel_cli",
+           "kernel_boot", "kernel_driver"):
     try:
         __import__(_m)
     except Exception as _e:                                        # noqa: BLE001

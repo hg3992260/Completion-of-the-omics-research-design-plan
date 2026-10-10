@@ -280,6 +280,64 @@ def project_set_stage(project: str, stage: int, status: str = "",
 
 
 @mcp.tool()
+def project_sections() -> str:
+    """列出「统计」与「SCI 结构」两页的分节定义（key/title/条目数），供 agent 驱动这两页。
+
+    这两页此前不在 MCP 工具面内，opencode 无法驱动；本工具补上只读目录。
+    """
+    import stat_data
+    import shape_data
+
+    def _brief(items):
+        return [{"key": s.get("key"), "title": s.get("title", ""),
+                 "n_checks": len(s.get("checks") or [])} for s in items]
+    return json.dumps({"stat": _brief(stat_data.STAGES),
+                       "shape": _brief(shape_data.SHAPE)},
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def project_get_section(project: str, section: str, key: str = "") -> str:
+    """读取某页分节的已存状态：section ∈ stat|shape；key 省略则返回该页全部分节。
+
+    对应项目 JSON 的顶层 stat / shape 字段。
+    """
+    p = _find_project(project)
+    if p is None:
+        return json.dumps({"error": f"找不到项目：{project}"}, ensure_ascii=False)
+    bag = getattr(p, section, None) if section in ("stat", "shape") else None
+    if not isinstance(bag, dict):
+        return json.dumps({"error": f"未知 section：{section}（应为 stat 或 shape）"},
+                          ensure_ascii=False)
+    return json.dumps(({key: bag.get(key) or {}} if key else bag),
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def project_set_section(project: str, section: str, key: str, state: str) -> str:
+    """写回某页某分节：state 为 JSON 字符串（如 {"checks": {...}} 或 {"notes": "..."}）。
+
+    与 GUI 共享同一份项目 JSON，写后立即落盘；dict 状态做浅合并。
+    """
+    p = _find_project(project)
+    if p is None:
+        return json.dumps({"error": f"找不到项目：{project}"}, ensure_ascii=False)
+    if section not in ("stat", "shape"):
+        return json.dumps({"error": f"未知 section：{section}（应为 stat 或 shape）"},
+                          ensure_ascii=False)
+    try:
+        parsed = json.loads(state) if isinstance(state, str) and state.strip() else {}
+    except json.JSONDecodeError as e:
+        return json.dumps({"error": f"state 不是合法 JSON：{e}"}, ensure_ascii=False)
+    bag = getattr(p, section)
+    cur = bag.get(key) or {}
+    bag[key] = {**cur, **parsed} if isinstance(cur, dict) and isinstance(parsed, dict) else parsed
+    path = p.save()
+    return json.dumps({"ok": True, "project": p.name, "section": section, "key": key,
+                       "saved_to": path}, ensure_ascii=False)
+
+
+@mcp.tool()
 def export_markdown(project: str) -> str:
     """把项目导出为 Markdown 文件，返回文件路径。"""
     p = _find_project(project)

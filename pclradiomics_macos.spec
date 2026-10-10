@@ -43,11 +43,16 @@ datas += collect_data_files("docx")   # python-docx 的默认模板 templates/de
 KERNEL_EXE_MAC = os.path.join(ROOT, "opencode", "opencode")
 if os.path.exists(KERNEL_EXE_MAC):
     datas.append((KERNEL_EXE_MAC, "opencode"))
+# 随包 agent/skill 模板（kernel_config.install_builtin_assets 安装到隔离 home）
+_KERNEL_ASSETS = os.path.join(ROOT, "kernel_assets")
+if os.path.isdir(_KERNEL_ASSETS):
+    datas.append((_KERNEL_ASSETS, "kernel_assets"))
 
 MODULES = ["app_paths", "stages_data", "llm_client", "design_agent",
            "mcp_server", "api_server", "cli", "win_stdio",
            "docx_export", "manuscript_review",
-           "kernel_client", "kernel_config", "kernel_cli", "kernel_boot"]
+           "kernel_client", "kernel_config", "kernel_cli", "kernel_boot",
+           "kernel_driver"]
 HIDDEN = list(MODULES)
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi", "h11"):

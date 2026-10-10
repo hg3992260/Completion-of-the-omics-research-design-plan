@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """opencode 内核客户端（Qt-free）—— 宿主与内嵌内核之间的唯一接缝。
 
 架构关系（详见 opencode-embedding-plan.md §2.1）：
@@ -143,6 +143,57 @@ def opencode_exe() -> str | None:
     return _stabilize_extracted(found) if found else None
 
 
+def list_processes(exe_name: str = _EXE_NAME) -> list[dict]:
+    """列出同名进程 [{pid, exe, cmd}]（Windows 用 CIM，macOS/Linux 用 ps）。
+
+    用于「只保留一个内核终端」时识别与本程序同源的 opencode 进程，
+    避免误伤用户自己安装的 opencode（exe 路径不同）。
+    """
+    return (_list_processes_windows(exe_name) if os.name == "nt"
+            else _list_processes_posix(exe_name))
+
+
+def _list_processes_windows(exe_name: str) -> list[dict]:
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='%s'\" | "
+          "ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.CommandLine)\" }"
+          % exe_name)
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=30).stdout
+    except Exception:                                                  # noqa: BLE001
+        return []
+    procs: list[dict] = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0].strip().isdigit():
+            procs.append({"pid": int(parts[0]), "exe": parts[1],
+                          "cmd": parts[2] if len(parts) > 2 else ""})
+    return procs
+
+
+def _list_processes_posix(exe_name: str) -> list[dict]:
+    """macOS/Linux：`ps -axo pid=,comm=,args=`（comm 多为完整路径）。"""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,comm=,args="],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=20).stdout
+    except Exception:                                                  # noqa: BLE001
+        return []
+    procs: list[dict] = []
+    for line in (out or "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        pid, comm = int(parts[0]), parts[1]
+        cmd = parts[2] if len(parts) > 2 else ""
+        exe_base = os.path.basename(comm)
+        argv0 = os.path.basename(cmd.split()[0]) if cmd.split() else ""
+        if exe_name in (exe_base, argv0):
+            procs.append({"pid": pid, "exe": comm, "cmd": cmd})
+    return procs
+
+
 # ------------------------------------------------------------------- 环境变量（隔离）
 
 def kernel_env(password: str | None = None, extra: dict | None = None) -> dict:
@@ -221,6 +272,26 @@ class KernelError(RuntimeError):
     pass
 
 
+def model_ref(value) -> dict | None:
+    """"provider/model" → {id, providerID}（Model.Ref）；dict 原样返回。"""
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and "/" in value:
+        provider, mid = value.split("/", 1)
+        return {"providerID": provider, "id": mid}
+    return None
+
+
+def legacy_model_ref(value) -> dict | None:
+    """同 model_ref，但转成 V1 SessionPrompt.ModelRef = {providerID, modelID}。"""
+    ref = model_ref(value)
+    if not ref:
+        return None
+    return {"providerID": ref.get("providerID"), "modelID": ref.get("id")}
+
+
 # ------------------------------------------------------------------------- 客户端
 
 class KernelClient:
@@ -232,10 +303,17 @@ class KernelClient:
     _WARN_RE = re.compile(r"^\s*(Warning|!)\s", re.I)
 
     def __init__(self, exe: str | None = None, state: KernelState | None = None,
-                 verbose: bool = False):
+                 verbose: bool = False, directory: str | None = None,
+                 extra_env: dict | None = None):
         self.exe = exe or opencode_exe()
         self.state = state
         self.verbose = verbose
+        #: 追加到内核环境（如 OPENCODE_CONFIG_CONTENT 注入 provider.apiKey）
+        self.extra_env = dict(extra_env or {})
+        #: 显式钉住的实例目录（x-opencode-directory）。为空则由内核按 cwd/项目根推断。
+        #: 事件流（/api/event）会按 event.location.directory === instance.directory
+        #: 过滤，钉住目录可避免"会话事件被静默丢弃"。
+        self.directory = directory
         self._proc: subprocess.Popen | None = None
         self._log_lines: list[str] = []
         #: 实测数字（P0 关注）：从 spawn 到打印端口 / 到 health 通过。
@@ -371,7 +449,7 @@ class KernelClient:
         deadline = started + timeout
 
         password = secrets.token_urlsafe(24)
-        env = kernel_env(password)
+        env = kernel_env(password, extra=self.extra_env)
         # 不传 --port：opencode 默认 0，由系统分配空闲端口（network.ts:10）
         cmd = [self.exe, "serve", "--hostname", "127.0.0.1"]
 
@@ -453,6 +531,8 @@ class KernelClient:
         url = st.url + path
         data = None
         headers = {"Authorization": self._auth_header(st), "Accept": "application/json"}
+        if self.directory:
+            headers["x-opencode-directory"] = self.directory
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -488,12 +568,22 @@ class KernelClient:
         got = self.request("GET", "/api/session")
         return got.get("data") or got if isinstance(got, dict) else got
 
-    def new_session(self, title: str | None = None, location: dict | None = None) -> dict:
+    def new_session(self, title: str | None = None, location: dict | None = None,
+                    model: dict | str | None = None, agent: str | None = None) -> dict:
+        """建会话。model 为 Model.Ref = {id, providerID}（payload 支持）。
+
+        ⚠️ 不显式给 model 时，V2 会话会落到内核默认模型（实测是 opencode/exo-free，
+        已废弃，HTTP 410）。因此宿主/控制台应总是传自己配的模型。
+        """
         body: dict = {}
         if title:
             body["title"] = title
         if location:
             body["location"] = location
+        if model:
+            body["model"] = model
+        if agent:
+            body["agent"] = agent
         return self.request("POST", "/api/session", body or None)
 
     def session_exists(self, session_id: str) -> bool:
@@ -507,6 +597,25 @@ class KernelClient:
     def session_get(self, session_id: str) -> dict:
         sid = urllib.parse.quote(session_id, safe="")
         return self.request("GET", f"/api/session/{sid}", timeout=20)
+
+    def context(self, session_id: str) -> list:
+        """当前上下文消息（含 assistant 的 finish/content）。
+
+        用途：① 完成判定（末条 assistant 有 finish 即本轮结束）——
+        因为实测 `POST /session/:id/wait` 在此构建返回 503 "not available yet"；
+        ② 兜底取正文（SSE 若未收到/被目录过滤）。
+        """
+        sid = urllib.parse.quote(session_id, safe="")
+        got = self.request("GET", f"/api/session/{sid}/context", timeout=30)
+        return (got or {}).get("data") or []
+
+    def switch_model(self, session_id: str, model) -> dict:
+        """切换会话模型（protocol/groups/session.ts:189）。model 为 'provider/id' 或 {id,providerID}。"""
+        sid = urllib.parse.quote(session_id, safe="")
+        ref = model_ref(model)
+        if not ref:
+            raise KernelError(f"非法 model：{model!r}（应为 'provider/model' 或 {{id,providerID}}）")
+        return self.request("POST", f"/api/session/{sid}/model", {"model": ref}, timeout=30)
 
     def prompt(self, session_id: str, text: str, *, delivery: str | None = None,
                resume: bool | None = None) -> dict:
@@ -523,27 +632,216 @@ class KernelClient:
         sid = urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/api/session/{sid}/interrupt", None, timeout=30)
 
+    def wait_session(self, session_id: str, timeout: float = 900.0) -> dict:
+        """阻塞到该会话的 agent loop 变为 idle（protocol/groups/session.ts:241）。
+
+        比"轮询 session.status"更权威：内核自己判定 drain 结束。
+        """
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("POST", f"/api/session/{sid}/wait", None, timeout=timeout)
+
+    # ---------------------------------------------------- 问答 / 权限（回灌）
+    #  内核会**阻塞等待**这两类请求的回复。GUI 就地答题经此回灌（plan §5），
+    #  不建立第二套真值：写回的是 opencode 自己的请求队列。
+    #    question:   GET  /api/session/:id/question
+    #                POST /api/session/:id/question/:rid/reply   {answers: [[label,...]]}
+    #                POST /api/session/:id/question/:rid/reject
+    #    permission: GET  /api/session/:id/permission
+    #                POST /api/session/:id/permission/:rid/reply {reply, message?}
+    #  字段形状见 packages/schema/src/question.ts、permission.ts：
+    #    Question.Request { id, sessionID, questions:[{question,header,options:[{label,description}],multiple?,custom?}], tool? }
+    #    Question.Reply   { answers: [[label,...]] }  —— 按 questions 顺序，各给一个"已选标签"数组
+    #    Permission.Request { id, sessionID, action, resources:[str], save?, metadata?, source? }
+    #    Permission.Reply   "once" | "always" | "reject"
+
+    def session_questions(self, session_id: str) -> list:
+        sid = urllib.parse.quote(session_id, safe="")
+        got = self.request("GET", f"/api/session/{sid}/question", timeout=30)
+        return (got or {}).get("data") or []
+
+    def reply_question(self, session_id: str, request_id: str,
+                       answers: list) -> dict:
+        """answers: [[label,...], ...]，按问题顺序（Question.Reply）。"""
+        sid = urllib.parse.quote(session_id, safe="")
+        rid = urllib.parse.quote(request_id, safe="")
+        return self.request("POST", f"/api/session/{sid}/question/{rid}/reply",
+                            {"answers": answers}, timeout=30)
+
+    def reject_question(self, session_id: str, request_id: str) -> dict:
+        sid = urllib.parse.quote(session_id, safe="")
+        rid = urllib.parse.quote(request_id, safe="")
+        return self.request("POST", f"/api/session/{sid}/question/{rid}/reject",
+                            None, timeout=30)
+
+    def session_permissions(self, session_id: str) -> list:
+        sid = urllib.parse.quote(session_id, safe="")
+        got = self.request("GET", f"/api/session/{sid}/permission", timeout=30)
+        return (got or {}).get("data") or []
+
+    def reply_permission(self, session_id: str, request_id: str,
+                         reply: str, message: str | None = None) -> dict:
+        """reply ∈ {once, always, reject}（Permission.Reply）。"""
+        sid = urllib.parse.quote(session_id, safe="")
+        rid = urllib.parse.quote(request_id, safe="")
+        body: dict = {"reply": reply}
+        if message:
+            body["message"] = message
+        return self.request("POST", f"/api/session/{sid}/permission/{rid}/reply",
+                            body, timeout=30)
+
+    # ------------------------------------------------- legacy V1 HTTP 会话面
+    #  为什么用它：V2 /api/session 的模型解析在本构建里只认 opencode/* 自有模型
+    #  （实测 ModelUnavailableError），而 legacy /session/:id/message 走 V1
+    #  SessionPrompt（服务端执行、读 auth.json），能直接用用户配的 deepseek，
+    #  且 question/permission 都发生在服务端，可经 /question、/permission 回灌。
+    #  —— 这是「opencode 驱动 + GUI 就地答题」可行的通道。
+
+    def create_session(self, title: str | None = None,
+                       model=None, agent: str | None = None) -> dict:
+        body: dict = {}
+        if title:
+            body["title"] = title
+        if model:
+            body["model"] = legacy_model_ref(model) or model
+        if agent:
+            body["agent"] = agent
+        return self.request("POST", "/session", body or None, timeout=30)
+
+    def update_session_title(self, session_id: str, title: str) -> dict:
+        """PATCH /session/:id {title} —— 改 opencode 会话显示标题（groups/session.ts:227）。"""
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("PATCH", f"/session/{sid}", {"title": title}, timeout=30)
+
+    def tui_select_session(self, session_id: str) -> dict:
+        """POST /tui/select-session {sessionID} —— 让**已在运行的 TUI** 切到该会话。
+
+        这样切课题时复用同一个终端窗口（不重开、不闪窗）。
+        """
+        return self.request("POST", "/tui/select-session",
+                            {"sessionID": session_id}, timeout=30)
+
+    def tui_show_toast(self, message: str, variant: str = "info",
+                       title: str | None = None) -> dict:
+        """POST /tui/show-toast —— 在 TUI 里弹一条提示（可选）。"""
+        body: dict = {"message": message, "variant": variant}
+        if title:
+            body["title"] = title
+        return self.request("POST", "/tui/show-toast", body, timeout=15)
+
+    def prompt_legacy(self, session_id: str, text: str, model=None,
+                      agent: str | None = None, timeout: float = 900.0) -> dict:
+        """POST /session/:id/message —— **阻塞到本轮结束**，返回 SessionV1.WithParts。
+
+        用 legacy 而非 V2：V1 SessionPrompt 在服务端执行，用 auth.json 的 provider；
+        返回 {info:{role,finish,modelID,providerID,...}, parts:[step-start,text,tool,...]}。
+        question/permission 会经 /event 推送并可经 /question、/permission 回灌。
+        """
+        sid = urllib.parse.quote(session_id, safe="")
+        body: dict = {"parts": [{"type": "text", "text": text}]}
+        ref = legacy_model_ref(model)
+        if ref:
+            body["model"] = ref
+        if agent:
+            body["agent"] = agent
+        return self.request("POST", f"/session/{sid}/message", body, timeout=timeout)
+
+    def post_noreply(self, session_id: str, text: str, model=None,
+                     timeout: float = 60.0) -> dict:
+        """向会话发一条**不触发模型回复**的消息（GUI 操作日志用）。
+
+        PromptInput 有 noReply 字段：消息进入会话历史/TUI，但模型不回话。
+        """
+        sid = urllib.parse.quote(session_id, safe="")
+        body: dict = {"parts": [{"type": "text", "text": text}], "noReply": True}
+        ref = legacy_model_ref(model)
+        if ref:
+            body["model"] = ref
+        return self.request("POST", f"/session/{sid}/message", body, timeout=timeout)
+
+    def legacy_questions(self) -> list:
+        """GET /question —— 服务端待决问题（Question.Request[]）。"""
+        got = self.request("GET", "/question", timeout=30)
+        return got if isinstance(got, list) else ((got or {}).get("data") or [])
+
+    def legacy_reply_question(self, request_id: str, answers: list) -> dict:
+        rid = urllib.parse.quote(request_id, safe="")
+        return self.request("POST", f"/question/{rid}/reply", {"answers": answers}, timeout=30)
+
+    def legacy_reject_question(self, request_id: str) -> dict:
+        rid = urllib.parse.quote(request_id, safe="")
+        return self.request("POST", f"/question/{rid}/reject", None, timeout=30)
+
+    def legacy_permissions(self) -> list:
+        """GET /permission —— 待决权限（PermissionV1.Request[]）。"""
+        got = self.request("GET", "/permission", timeout=30)
+        return got if isinstance(got, list) else ((got or {}).get("data") or [])
+
+    def legacy_reply_permission(self, request_id: str, reply: str,
+                                message: str | None = None) -> dict:
+        """reply ∈ {once, always, reject}（PermissionV1.Reply）。"""
+        rid = urllib.parse.quote(request_id, safe="")
+        body: dict = {"reply": reply}
+        if message:
+            body["message"] = message
+        return self.request("POST", f"/permission/{rid}/reply", body, timeout=30)
+
     # ------------------------------------------------------------- SSE
 
     def events(self, session_id: str | None = None, timeout: float = 300.0,
-               max_events: int | None = None):
+               max_events: int | None = None, on_open=None, stop_event=None,
+               poll: float = 2.0, legacy: bool = False):
         """迭代服务端事件（SSE）。
 
         session_id 为空走实例级 /api/event；否则走
         /api/session/:id/event（protocol/groups/session.ts:327）。
         产出已解析的 dict；无法解析的行以 {"_raw": ...} 形式产出。
+
+        事件体形状是 **{id, type, properties}** —— 见
+        server/routes/instance/httpapi/handlers/event.ts 的
+        `Stream.map((event) => ({ id, type, properties: event.data }))`，
+        即业务字段在 `properties` 下（不是 `data`）。
+
+        on_open     连接建立后回调一次（subscribe-then-prompt 的同步点）
+        stop_event  threading.Event；置位后尽快返回
+        poll        读超时（秒）。服务端每 10s 发一次 server.heartbeat，
+                    这里用较短的读超时轮询，让 stop_event 更灵敏。
         """
         st = self.state
         if not st:
             raise KernelError("内核未启动")
-        path = f"/api/session/{urllib.parse.quote(session_id, safe='')}/event" if session_id else "/api/event"
+        if legacy:
+            path = "/event"
+        else:
+            path = f"/api/session/{urllib.parse.quote(session_id, safe='')}/event" if session_id else "/api/event"
         req = urllib.request.Request(
             st.url + path,
             headers={"Authorization": self._auth_header(st), "Accept": "text/event-stream"},
         )
+        if self.directory:
+            req.add_header("x-opencode-directory", self.directory)
         count = 0
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            for raw in res:
+        with urllib.request.urlopen(req, timeout=15) as res:
+            # 连接建立后再把底层 socket 读超时调小，便于 stop_event 及时生效
+            try:
+                res.fp.raw._sock.settimeout(poll)
+            except Exception:                                          # noqa: BLE001
+                pass
+            if on_open is not None:
+                try:
+                    on_open()
+                except Exception:                                      # noqa: BLE001
+                    pass
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                try:
+                    raw = res.readline()
+                except (socket.timeout, TimeoutError):
+                    continue
+                except OSError:
+                    return
+                if not raw:
+                    return
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if not line or line.startswith(":"):
                     continue
@@ -573,7 +871,7 @@ class KernelClient:
         if not self.exe:
             raise KernelError("找不到 opencode 可执行文件")
         st = self.state
-        env = kernel_env(st.password if st else None)
+        env = kernel_env(st.password if st else None, extra=self.extra_env)
         cmd = [self.exe, "run", "--format", "json"]
         if st:
             # 挂到常驻实例，避免另起一个 server。
@@ -617,7 +915,7 @@ class KernelClient:
         if not self.exe:
             raise KernelError("找不到 opencode 可执行文件")
         st = self.state
-        proc = subprocess.run([self.exe, "models"], env=kernel_env(st.password if st else None),
+        proc = subprocess.run([self.exe, "models"], env=kernel_env(st.password if st else None, extra=self.extra_env),
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout)
         out = []
@@ -633,7 +931,7 @@ class KernelClient:
             raise KernelError("找不到 opencode 可执行文件")
         st = self.state
         proc = subprocess.run([self.exe, "mcp", "list"],
-                              env=kernel_env(st.password if st else None),
+                              env=kernel_env(st.password if st else None, extra=self.extra_env),
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout, cwd=kernel_home())
         return (proc.stdout or "") + (proc.stderr or "")
@@ -678,7 +976,7 @@ class KernelClient:
         elif continue_last:
             attach += ["--continue"]
 
-        env = kernel_env(st.password)          # 与 server 共用同一份环境（风险 20）
+        env = kernel_env(st.password, extra=self.extra_env)  # 与 server 共用同一份环境（风险 20）
 
         # ---- macOS：走 Terminal.app，得到用户熟悉的 bash ----
         if sys.platform == "darwin":
@@ -775,3 +1073,4 @@ def status() -> dict:
 
 if __name__ == "__main__":
     print(json.dumps(status(), ensure_ascii=False, indent=2))
+
