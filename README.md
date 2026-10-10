@@ -17,8 +17,38 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v2.0.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v2.1.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+### v2.1.0 · GUI 启动即联动内核 + 项目 ↔ 会话绑定
+
+把 v2.0.0「内核已嵌入」的两条手动环节改成**自动**：
+
+- **打开 GUI 程序，opencode 同时启动**，界面直接显示在**独立终端窗口**里
+  （Windows 新控制台 / macOS `Terminal.app` 的 bash）。链路是
+  `起内核 → 把本程序注册成它的 MCP 服务 → 绑定当前项目 session → 终端 attach 同一实例`，
+  全程后台线程、不阻塞首屏。
+- **GUI 切项目 → 内核新建或切换对应 session**：映射存
+  `<程序目录>/opencode/projects.json`；已有 session 复用，没有才新建，终端界面跟着切。
+- 于是可以在那个终端里对 opencode 下**全自动命令**，让它调用本程序的 21 个组学
+  领域工具完成功能操作。
+
+开关（默认都开）：`PCL_KERNEL_AUTOSTART=0` 关自动启动、`PCL_KERNEL_TUI=0` 不弹终端。
+`--shot` / `--e2e` / `--demo` 自动跳过联动。
+
+控制台对等命令：
+
+```bat
+PCLRadiomics.exe kernel boot --project "某课题"
+PCLRadiomics.exe kernel project list|ensure|switch|unbind --name X
+```
+
+**修掉的两个内核进程管理 bug**（只在控制台用法下暴露）：
+每敲一条 `cli.py kernel …` 就多起一个内核进程（`ensure_running` 只"报告复用"
+却不接管存活实例 → 新增 `adopt_state()` 真正接管）；
+`kernel stop` 跨进程停不掉（只看本进程句柄 → 改为退回状态文件记录的实例）。
+
+> 详见 [`RELEASE_v2.1.0.md`](RELEASE_v2.1.0.md)。
 
 ### v2.0.0 · 内嵌 opencode 内核
 
