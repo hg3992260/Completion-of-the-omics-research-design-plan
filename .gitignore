@@ -18,8 +18,7 @@ dist/
 dist-console/          # console 子系统变体的产物（PCLRadiomicsConsole）
 build-console/
 dist_onefile/
-build_onefile/
-dist-web/
+build_onefile/dist-web/
 build-web/
 dist-web-scipy/
 build-web-scipy/
@@ -87,3 +86,9 @@ manuscript_review/llm_cache/
 # 手稿审阅的验证脚本产物（临时 docx / 截图 / 日志）
 _verify_out/
 _mr_probe/
+
+# Release 附件（构建产物，体积上百 MB，不入库）
+PCLRadiomics*-windows-x64.zip
+pclradiomics-macos-cli.zip
+*.dmg
+*.dmg.sha256
