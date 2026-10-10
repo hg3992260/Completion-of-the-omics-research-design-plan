@@ -54,10 +54,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 获取内嵌 opencode 内核二进制（可选）
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          # macOS 的内核嵌入是"可选增强"：v2.0.0 的完整目标是 Windows。
+          # 下到了就打进 .app（获得完整内核能力）；下不到就跳过 ——
+          # pclradiomics_macos.spec 只在存在时才收集，kernel 子命令仍可编译通过，
+          # 只是 `kernel selftest` 会明确报告"找不到 opencode"。
+          if ! python get_opencode_kernel.py --json; then
+            echo "::warning::opencode 内核未获取，本次 macOS 产物不含内核"
+          fi
+          exit 0
+
+      - name: 内核代码自检（不依赖二进制）
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -c "import kernel_client, kernel_config, kernel_cli; print('kernel imports OK')"
+          python cli.py kernel selftest || echo "::warning::macOS 内核自检未完全通过（多半是没有内核二进制，属预期）"
+          exit 0
+
       - name: 导入自检（不依赖网络与密钥）
         working-directory: ${{ env.APP_DIR }}
         run: |
           python -c "import cli, design_studio, ui_kit, mcp_server, api_server, app_paths, win_stdio; print('imports OK')"
+          # 手稿审阅是独立包，全靠函数内的延迟导入 —— 必须显式自检，
+          # 否则它没被打进包时构建照样"成功"，用户点开才发现功能不可用。
+          python -c "import manuscript_review, manuscript_review.mr_engine, manuscript_review.mr_word, manuscript_review.mr_thread, docx_export; print('manuscript_review imports OK')"
+          python -m manuscript_review.cli --selfcheck
+          python -m manuscript_review.cli --layers-info
           python -c "import sys, ui_kit; print('platform', sys.platform, '| UI_FONT', ui_kit.UI_FONT)"
           python cli.py paths
           python cli.py stages | head -3

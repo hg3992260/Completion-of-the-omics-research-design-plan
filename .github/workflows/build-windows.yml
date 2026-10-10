@@ -50,10 +50,39 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 获取内嵌 opencode 内核二进制
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          # 内核二进制 172.3 MB，超过 GitHub 单文件 100 MB 硬上限，无法入库：
+          # 由这一步从 opencode 的 release 下载，再由 pclradiomics.spec 打进产物。
+          python get_opencode_kernel.py --json
+          if ($LASTEXITCODE -ne 0) { throw "opencode 内核二进制获取失败" }
+        shell: pwsh
+
+      - name: 内核离线自检（不联网、不需密钥）
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python cli.py kernel selftest
+          if ($LASTEXITCODE -ne 0) { throw "内核自检未通过" }
+          # 内置工具数必须仍是 21（回归保护：新增工具时同步更新此断言）
+          python mcp_server.py --list-tools | Measure-Object -Line | ForEach-Object {
+            Write-Host "MCP 工具数: $($_.Lines)"
+            if ($_.Lines -lt 21) { throw "MCP 工具数少于 21" }
+          }
+          exit 0
+        shell: pwsh
+
       - name: 导入自检（不依赖网络与密钥）
         working-directory: ${{ env.APP_DIR }}
         run: |
           python -c "import cli, design_studio, ui_kit, mcp_server, api_server, app_paths, win_stdio; print('imports OK')"
+          # 手稿审阅是独立包，全靠函数内的延迟导入 —— 必须显式自检，
+          # 否则它没被打进包时构建照样"成功"，用户点开才发现功能不可用。
+          python -c "import manuscript_review, manuscript_review.mr_engine, manuscript_review.mr_word, manuscript_review.mr_thread, docx_export; print('manuscript_review imports OK')"
+          python -m manuscript_review.cli --selfcheck
+          python -m manuscript_review.cli --layers-info
+          # 内嵌内核的三个模块同理（延迟导入，漏打包会静默失效）
+          python -c "import kernel_client, kernel_config, kernel_cli; print('kernel imports OK')"
           python cli.py paths
           python cli.py stages | Select-Object -First 3
           python mcp_server.py --list-tools
@@ -78,10 +107,35 @@ jobs:
           $exe = "dist/PCLRadiomics/PCLRadiomics.exe"
           & $exe paths
           & $exe stages | Select-Object -First 3
+          # 冻结包里手稿审阅的子模块是否齐备（"编译成功但功能缺失"的直接检查）
+          & $exe manuscript_review --selfcheck
+          if ($LASTEXITCODE -ne 0) { throw "冻结包里 manuscript_review 子模块不齐备" }
+          # 冻结包里的内嵌内核：二进制是否打进、路径能否解析、21 个工具是否在
+          & $exe kernel selftest
+          if ($LASTEXITCODE -ne 0) { throw "冻结产物里内核自检不通过（二进制没打进？）" }
           # 冻结后资源与 stdio 接管是否正常（同时验证 PyCt6 主题、certifi、win_stdio）
           # check 会联网列模型：CI 里通常没有密钥，失败不作为构建失败
           & $exe check | Select-Object -Last 6
           if ($LASTEXITCODE -ne 0) { Write-Host "check 未通过（多半是未配置 API Key），不阻塞构建" }
+          exit 0
+        shell: pwsh
+
+      - name: 打 console 变体（决策 D2：独立变体，避免与 windowed 主程序互相覆盖）
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          PCL_CONSOLE: "1"
+          PCL_APP_NAME: "PCLRadiomicsConsole"
+        run: python -m PyInstaller --noconfirm --clean --distpath dist-console pclradiomics.spec
+
+      - name: 校验 console 变体
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $exe = "dist-console/PCLRadiomicsConsole/PCLRadiomicsConsole.exe"
+          if (-not (Test-Path $exe)) { throw "未生成 console 变体" }
+          & $exe kernel selftest
+          if ($LASTEXITCODE -ne 0) { throw "console 变体里内核自检不通过" }
+          New-Item -ItemType Directory -Force "dist-console/PCLRadiomicsConsole/projects" | Out-Null
+          Copy-Item theme_tech.json, logo_icon.ico, logo_badge.png, logo_banner.png "dist-console/PCLRadiomicsConsole/" -Force
           exit 0
         shell: pwsh
 
@@ -100,6 +154,10 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         env:
           PCL_ONEFILE: "1"
+          # 单文件版不含内核：onefile 每次启动都要把内容解包到 %TEMP%，
+          # 再塞 172 MB 内核会让启动严重恶化，且 MCP 客户端会反复拉起进程。
+          # 完整内核能力用 onedir 的 PCLRadiomics.exe（见决策 D5 与 plan §4.3）。
+          PCL_SKIP_KERNEL: "1"
         run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile pclradiomics.spec
 
       - name: 校验单文件版
@@ -110,12 +168,20 @@ jobs:
           if (-not (Test-Path $exe)) { throw "未生成单文件 exe" }
           Write-Host ("单文件体积: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB))
           & $exe stages | Select-Object -First 2
+          & $exe manuscript_review --selfcheck
+          if ($LASTEXITCODE -ne 0) { throw "单文件版里 manuscript_review 子模块不齐备" }
+          # 单文件版按设计不含内核：self-test 会明确报"找不到 opencode.exe"，不算失败
+          & $exe kernel selftest | Select-Object -Last 3
           exit 0
         shell: pwsh
 
-      - name: 打 zip（onedir）
+      - name: 打 zip（onedir 主程序 + console 变体）
         working-directory: ${{ env.APP_DIR }}
-        run: Compress-Archive -Path "dist/PCLRadiomics/*" -DestinationPath "PCLRadiomics-windows-x64.zip" -Force
+        run: |
+          Compress-Archive -Path "dist/PCLRadiomics/*" -DestinationPath "PCLRadiomics-windows-x64.zip" -Force
+          Compress-Archive -Path "dist-console/PCLRadiomicsConsole/*" -DestinationPath "PCLRadiomicsConsole-windows-x64.zip" -Force
+          Write-Host ("主程序包: {0:N1} MB" -f ((Get-Item "PCLRadiomics-windows-x64.zip").Length / 1MB))
+          Write-Host ("console 包: {0:N1} MB" -f ((Get-Item "PCLRadiomicsConsole-windows-x64.zip").Length / 1MB))
         shell: pwsh
 
       - name: 上传构建产物
@@ -124,6 +190,7 @@ jobs:
           name: PCLRadiomics-windows-x64
           path: |
             ${{ env.APP_DIR }}/PCLRadiomics-windows-x64.zip
+            ${{ env.APP_DIR }}/PCLRadiomicsConsole-windows-x64.zip
             ${{ env.APP_DIR }}/dist-onefile/*.exe
           if-no-files-found: warn
           retention-days: 30
@@ -134,5 +201,6 @@ jobs:
         with:
           files: |
             ${{ env.APP_DIR }}/PCLRadiomics-windows-x64.zip
+            ${{ env.APP_DIR }}/PCLRadiomicsConsole-windows-x64.zip
             ${{ env.APP_DIR }}/dist-onefile/*.exe
           generate_release_notes: true
