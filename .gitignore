@@ -15,10 +15,13 @@ opencode/
 # 打包产物与缓存
 build/
 dist/
-dist-console/          # console 子系统变体的产物（PCLRadiomicsConsole）
+# console 子系统变体的产物（PCLRadiomicsConsole）：注意 .gitignore 不支持行内注释，
+# 注释必须单独占一行，否则整行会被当成一个匹配不到任何东西的模式。
+dist-console/
 build-console/
 dist_onefile/
-build_onefile/dist-web/
+build_onefile/
+dist-web/
 build-web/
 dist-web-scipy/
 build-web-scipy/
