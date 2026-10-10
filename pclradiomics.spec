@@ -68,10 +68,13 @@ if not os.path.exists(KERNEL_EXE) and not SKIP_KERNEL:
             "  · 若确实要打一个不含内核的版本，设 PCL_SKIP_KERNEL=1。"
         )
 
-if os.path.exists(KERNEL_EXE):
+if os.path.exists(KERNEL_EXE) and not SKIP_KERNEL:
     datas.append((KERNEL_EXE, "opencode"))
     print("[spec] 已纳入内嵌内核: {0:.1f} MB".format(os.path.getsize(KERNEL_EXE) / 1024 / 1024))
 elif SKIP_KERNEL:
+    # 注意：SKIP_KERNEL 必须同时挡住「下载」与「纳入」。只挡下载是不够的 ——
+    # 同一个 CI job 里 onedir 先下载了内核，onefile 阶段文件已存在，
+    # 若不判断 SKIP_KERNEL 就会被一起打进单文件版（实测踩到：136 MB）。
     print("[spec] 按配置跳过内嵌内核（PCL_SKIP_KERNEL=1 或 onefile 默认）")
 
 HIDDEN = ["app_paths", "stages_data", "llm_client", "design_agent",
