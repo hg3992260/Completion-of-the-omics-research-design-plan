@@ -41,6 +41,39 @@ import kernel_client as kc                                              # noqa: 
 import kernel_config as kcfg                                            # noqa: E402
 
 
+# --------------------------------------------------------------------------- 日志
+
+def boot_log_path() -> str:
+    """联动的持久日志。
+
+    为什么必须有：窗口化构建下 stderr 可能不可用，用户"双击后什么都没发生"
+    时无法定位。把每一次启动尝试（含失败原因）落盘，是最低成本的诊断手段。
+    """
+    return os.path.join(kc.kernel_home(), "boot.log")
+
+
+def boot_log_tail(lines: int = 60) -> list[str]:
+    path = boot_log_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return [x.rstrip() for x in fh.readlines()[-lines:]]
+    except OSError:
+        return []
+
+
+def log_attempt(message: str) -> None:
+    """模块级的落盘日志（不经过 KernelBoot 实例也能记录，用于 import 失败等）。"""
+    try:
+        path = boot_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [kernel] {message}\n")
+    except Exception:                                                  # noqa: BLE001
+        pass
+
+
 # --------------------------------------------------------------------------- 开关
 
 def _flag(name: str, default: bool) -> bool:
@@ -91,13 +124,31 @@ class KernelBoot:
     # ---------------------------------------------------------------- 日志
 
     def _say(self, message: str) -> None:
+        """写日志。三条出口，互为备份：
+
+        1) 内存（GUI 可回显）
+        2) 持久文件 <kernel_home>/boot.log —— 窗口化构建下 stderr 可能不可用，
+           而且用户"看不到任何反应"时，只有落盘日志能定位问题
+        3) stderr（若存在）
+        """
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         line = f"[kernel] {message}"
         self._log.append(line)
-        sys.stderr.write(line + "\n")
         try:
-            sys.stderr.flush()
+            path = boot_log_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"{stamp} {line}\n")
         except Exception:                                              # noqa: BLE001
             pass
+        # 注意：windowed 构建里 sys.stderr 可能是 None，绝不能直接 .write
+        stream = getattr(sys, "stderr", None)
+        if stream is not None:
+            try:
+                stream.write(line + "\n")
+                stream.flush()
+            except Exception:                                          # noqa: BLE001
+                pass
 
     def messages(self) -> list[str]:
         return list(self._log)
@@ -134,17 +185,25 @@ class KernelBoot:
         """启动内核 + 注册 MCP + 绑定项目 session + 弹 TUI。阻塞，供后台线程调用。"""
         with self._lock:
             out: dict = {"ok": False}
+            self._say(f"--- 启动尝试 project={project_name!r} argv={sys.argv[1:]!r} ---")
+            self._say(f"隔离 home = {kc.kernel_home()}")
+            self._say(f"可执行文件 = {self._exe or kc.opencode_exe() or '(未找到)'}")
             try:
                 self._client = self._client or kc.KernelClient(exe=self._exe or kc.opencode_exe())
                 if not self._client.exe:
-                    out["error"] = ("找不到 opencode 可执行文件（设置 PCL_OPENCODE_EXE "
-                                    "或放到 <程序目录>/opencode/）")
-                    self._say(out["error"])
+                    out["error"] = (
+                        "找不到 opencode 可执行文件。三种解决方式："
+                        "① 使用含内核的产物（PCLRadiomics-windows-x64.zip 解压版，"
+                        "或带内核的单文件版）；"
+                        "② 设环境变量 PCL_OPENCODE_EXE 指向 opencode.exe；"
+                        f"③ 把 opencode.exe 放到 {os.path.join(kc.kernel_home(), 'opencode.exe')}"
+                    )
+                    self._say("失败：" + out["error"])
                     return out
 
                 state = self._client.ensure_running(timeout=180)
                 self._say(f"内核已启动 {state.url}（{self._client.ready_seconds:.2f}s）"
-                          f" 版本 {state.version}")
+                          f" 版本 {state.version} pid={state.pid}")
 
                 # 方向 A：必须在建会话之前把 MCP 注册好，内核启动时才连得上
                 self._mcp_url = self._ensure_host_mcp()
@@ -155,13 +214,18 @@ class KernelBoot:
 
                 if tui_enabled():
                     self._spawn_tui(sid)
+                else:
+                    self._say("已设 PCL_KERNEL_TUI=0，不打开终端界面")
 
                 out.update({"ok": True, "url": state.url, "sessionID": sid,
                             "mcp": self._mcp_url})
+                self._say("启动完成")
                 return out
             except Exception as e:                                     # noqa: BLE001
                 out["error"] = f"{type(e).__name__}: {e}"
                 self._say(f"内核联动启动失败：{out['error']}")
+                import traceback
+                self._say("堆栈：" + traceback.format_exc().replace("\n", " | ")[:800])
                 return out
 
     def stop(self) -> None:

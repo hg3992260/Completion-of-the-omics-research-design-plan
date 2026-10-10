@@ -129,6 +129,22 @@ def cmd_logs(args) -> int:
     return 0
 
 
+def cmd_bootlog(args) -> int:
+    """GUI 启动联动的持久日志（<kernel_home>/boot.log）。
+
+    「双击后 opencode 没启动」这类问题只有这里能定位 —— 窗口化构建下
+    stderr 可能不可用，界面上也未必有反应。
+    """
+    import kernel_boot as kb
+    lines = kb.boot_log_tail(args.lines)
+    if args.json:
+        _out({"path": kb.boot_log_path(), "lines": lines}, True)
+    else:
+        print(f"日志文件 {kb.boot_log_path()}")
+        print("\n".join(lines) if lines else "（还没有记录 —— 说明联动从未被触发过）")
+    return 0
+
+
 def cmd_ui(args) -> int:
     """在独立控制台窗口里拉起 opencode TUI，attach 到隔离实例（决策 D7）。"""
     client = _kernel(verbose=args.verbose)
@@ -510,6 +526,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-n", "--lines", type=int, default=60)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_logs)
+
+    p = sub.add_parser("bootlog", help="GUI 启动联动的持久日志（排查「opencode 没启动」）")
+    p.add_argument("-n", "--lines", type=int, default=60)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_bootlog)
 
     p = sub.add_parser("ui", help="在独立控制台窗口里拉起 opencode TUI（attach 到隔离实例）")
     p.add_argument("--dir", default=None, help="TUI 的工作目录")

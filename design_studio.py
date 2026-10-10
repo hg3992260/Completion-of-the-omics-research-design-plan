@@ -3506,13 +3506,27 @@ class StudioWindow(CMainWindow):
 
     def kernel_boot_async(self):
         """打开 GUI 即启动内核 + 弹终端 + 绑定当前项目 session。"""
+        def _fallback_log(msg: str):
+            """kernel_boot 都导不进来时（例如产物比联动代码旧），
+            仍然要把原因落盘 —— 否则用户只会看到"双击后什么都没发生"。"""
+            try:
+                from app_paths import data_path
+                path = data_path("opencode", "boot.log")
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [kernel] {msg}\n")
+            except Exception:                                          # noqa: BLE001
+                pass
+            self.kernel_event.emit(msg)
+
         try:
             import kernel_boot as kb
         except Exception as e:                                         # noqa: BLE001
-            self.kernel_event.emit(f"内核模块不可用：{type(e).__name__}: {e}")
+            _fallback_log(f"内核模块不可用（产物可能比联动代码旧，请重新打包）："
+                          f"{type(e).__name__}: {e}")
             return
         skip = kb.should_skip_for_mode()
         if skip:
+            kb.log_attempt(f"联动已跳过（{skip}）")
             self.kernel_event.emit(f"内核联动已跳过（{skip}）")
             return
         self._kboot = kb.instance()
@@ -3529,6 +3543,7 @@ class StudioWindow(CMainWindow):
                 else:
                     self.kernel_event.emit(f"内核启动失败：{out.get('error')}")
             except Exception as e:                                     # noqa: BLE001
+                kb.log_attempt(f"启动异常：{type(e).__name__}: {e}")
                 self.kernel_event.emit(f"内核启动异常：{type(e).__name__}: {e}")
 
         threading.Thread(target=worker, name="kernel-boot", daemon=True).start()
