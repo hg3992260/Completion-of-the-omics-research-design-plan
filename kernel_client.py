@@ -49,6 +49,17 @@ KERNEL_DIR_NAME = "opencode"
 _EXE_NAME = "opencode.exe" if os.name == "nt" else "opencode"
 
 
+def _no_window_kwargs() -> dict:
+    """隐藏子进程控制台窗口（Windows）。
+
+    ⚠️ windowed 主程序里，任何 console 子进程（tasklist/powershell/opencode models…）
+    默认都会**弹出一个黑框**——这正是「系统 console 反复开启关闭」的来源。
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def kernel_home() -> str:
     """内核的隔离 home（可写）。所有内核状态都落在它下面。"""
     d = data_path(KERNEL_DIR_NAME)
@@ -160,7 +171,7 @@ def _list_processes_windows(exe_name: str) -> list[dict]:
     try:
         out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
                              capture_output=True, text=True, encoding="utf-8",
-                             errors="replace", timeout=30).stdout
+                             errors="replace", timeout=30, **_no_window_kwargs()).stdout
     except Exception:                                                  # noqa: BLE001
         return []
     procs: list[dict] = []
@@ -394,11 +405,26 @@ class KernelClient:
     def _pid_alive(pid: int) -> bool:
         if pid <= 0:
             return False
+        if os.name == "nt":
+            # 用 Win32 OpenProcess 判存活：不起任何子进程 → 不闪控制台、不卡 GUI
+            try:
+                import ctypes
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                STILL_ACTIVE = 259
+                k = ctypes.windll.kernel32
+                h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+                if not h:
+                    return False
+                try:
+                    code = ctypes.c_ulong(0)
+                    if k.GetExitCodeProcess(h, ctypes.byref(code)):
+                        return code.value == STILL_ACTIVE
+                    return True
+                finally:
+                    k.CloseHandle(h)
+            except Exception:                                          # noqa: BLE001
+                return False
         try:
-            if os.name == "nt":
-                out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                                     capture_output=True, text=True, timeout=10).stdout
-                return str(pid) in out
             os.kill(pid, 0)
             return True
         except Exception:                                              # noqa: BLE001
@@ -418,7 +444,7 @@ class KernelClient:
     def _kill(pid: int) -> None:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=20)
+                           capture_output=True, timeout=20, **_no_window_kwargs())
         else:
             os.kill(pid, signal.SIGTERM)
 
@@ -917,7 +943,7 @@ class KernelClient:
         st = self.state
         proc = subprocess.run([self.exe, "models"], env=kernel_env(st.password if st else None, extra=self.extra_env),
                               capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout)
+                              errors="replace", timeout=timeout, **_no_window_kwargs())
         out = []
         for line in (proc.stdout or "").splitlines():
             line = line.strip()
@@ -933,7 +959,8 @@ class KernelClient:
         proc = subprocess.run([self.exe, "mcp", "list"],
                               env=kernel_env(st.password if st else None, extra=self.extra_env),
                               capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout, cwd=kernel_home())
+                              errors="replace", timeout=timeout, cwd=kernel_home(),
+                              **_no_window_kwargs())
         return (proc.stdout or "") + (proc.stderr or "")
 
     def log_tail(self, lines: int = 80) -> list[str]:
@@ -1000,14 +1027,25 @@ class KernelClient:
         if via_powershell and os.name == "nt":
             quoted = " ".join(f"'{a}'" for a in attach)
             cmd = ["powershell.exe", "-NoExit", "-Command", f"& {quoted}"]
-        else:
-            cmd = attach
+            self._log(f"拉起 TUI（PowerShell）：{' '.join(cmd[:4])} ...")
+            return subprocess.Popen(cmd, env=env, cwd=target,
+                                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
 
-        creationflags = 0
         if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-        self._log(f"拉起 TUI：{' '.join(cmd[:4])} ...")
-        return subprocess.Popen(cmd, env=env, cwd=target, creationflags=creationflags)
+            # 优先 Windows Terminal：conhost 对中文 IME 支持差，WT 才能正常输入中文。
+            wt = shutil.which("wt") or os.path.join(
+                os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", "wt.exe")
+            if os.path.exists(wt):
+                try:
+                    self._log("拉起 TUI（Windows Terminal）")
+                    return subprocess.Popen([wt, "-d", target, *attach], env=env, cwd=target)
+                except Exception:                                      # noqa: BLE001
+                    pass
+            self._log("拉起 TUI（conhost）")
+            return subprocess.Popen(attach, env=env, cwd=target,
+                                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+
+        return subprocess.Popen(attach, env=env, cwd=target)
 
     # ------------------------------------------------------------- 停止
 

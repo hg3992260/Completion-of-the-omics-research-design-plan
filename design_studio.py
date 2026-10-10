@@ -2505,6 +2505,8 @@ class StudioWindow(CMainWindow):
     kernel_event = QtCore.Signal(str)
     #: opencode 一轮任务结束（从工作线程发射，自动排队回 GUI 线程）
     opencode_done = QtCore.Signal()
+    #: 底部面板状态（后台线程算好 → 信号回 GUI 线程，避免阻塞）
+    console_status = QtCore.Signal(str, str)
 
     def __init__(self, demo: bool = False):
         sw, sh, sx, sy = screen_size(1520, 960, 1180, 720)
@@ -2529,6 +2531,7 @@ class StudioWindow(CMainWindow):
         self._oc_on_done = None
         self.kernel_event.connect(self._on_kernel_event)
         self.opencode_done.connect(self._on_opencode_done)
+        self.console_status.connect(self._apply_console_status)
         install_button_skin()          # 保证任何构造路径下按钮都有立体皮肤
         skeuo_kit.install_if_enabled()  # 高对比拟物三维皮肤（覆盖上面这层弱渐变）
 
@@ -3285,7 +3288,7 @@ class StudioWindow(CMainWindow):
         try:
             self._console_timer = QtCore.QTimer(self)
             self._console_timer.timeout.connect(self.refresh_console)
-            self._console_timer.start(5000)
+            self._console_timer.start(10000)
         except Exception:                                              # noqa: BLE001
             self._console_timer = None
         return f
@@ -3305,9 +3308,13 @@ class StudioWindow(CMainWindow):
             self.refresh_console()
 
     def refresh_console(self):
-        """刷新 MCP/内核状态摘要（由定时器与事件触发，不动后台线程）。"""
+        """刷新 MCP/内核状态摘要。**后台线程**执行（socket/进程检查不阻塞 GUI 线程）。"""
         if not hasattr(self, "console_mcp"):
             return
+        threading.Thread(target=self._refresh_console_worker,
+                         name="console-refresh", daemon=True).start()
+
+    def _refresh_console_worker(self):
         try:
             import mcp_server
             st = mcp_server.http_status() or {}
@@ -3315,7 +3322,6 @@ class StudioWindow(CMainWindow):
             mcp = f"MCP：{st.get('url') or '未启动'} · {n} 工具"
         except Exception as e:                                         # noqa: BLE001
             mcp = f"MCP：不可用（{type(e).__name__}）"
-        kmode = self._driver_mode()
         kern = "内核：未启动"
         if self._kboot is not None and self._kboot_ready:
             try:
@@ -3327,8 +3333,15 @@ class StudioWindow(CMainWindow):
                         f" · 项目 {s.get('project') or '—'}")
             except Exception:                                          # noqa: BLE001
                 kern = "内核：已启动"
-        head = f"驱动={kmode} · {kern} · {mcp}"
         try:
+            self.console_status.emit(mcp, kern)
+        except Exception:                                              # noqa: BLE001
+            pass
+
+    def _apply_console_status(self, mcp: str, kern: str):
+        """GUI 线程：把后台算好的状态写进面板（不阻塞）。"""
+        try:
+            head = f"驱动={self._driver_mode()} · {kern} · {mcp}"
             self.console_head.label().setText(head if len(head) <= 160 else head[:157] + "…")
             self.console_mcp.label().setText(mcp + "\n" + kern)
         except Exception:                                              # noqa: BLE001

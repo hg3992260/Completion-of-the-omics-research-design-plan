@@ -17,8 +17,16 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v2.2.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v2.2.1`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+### v2.2.1 · 进程机制修复（消除闪控制台 / 卡顿）+ TUI 中文输入
+
+- 所有内部子进程加 `CREATE_NO_WINDOW`（不再弹黑框）；判进程存活改用 Win32 `OpenProcess`（**不再起进程**）。
+- 底部「MCP / 内核状态」面板刷新移到**后台线程**，间隔 5s → **10s**（消除 GUI 卡顿）。
+- opencode 终端优先用 **Windows Terminal** 打开（中文 IME 正常）。
+
+> 详见 [`RELEASE_v2.2.1.md`](RELEASE_v2.2.1.md)。
 
 ### v2.2.0 · 内核联动可视化 + TUI 单窗口复用 + macOS 适配
 
