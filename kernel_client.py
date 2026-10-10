@@ -238,9 +238,14 @@ class KernelClient:
         self.verbose = verbose
         self._proc: subprocess.Popen | None = None
         self._log_lines: list[str] = []
-        #: 实测数字（P0 关注）：从 spawn 到打印端口 / 到 health 通过
+        #: 实测数字（P0 关注）：从 spawn 到打印端口 / 到 health 通过。
+        #: 注意：走 adopt_state() **接管**来的实例没有计时，两者保持 None ——
+        #: 调用方必须先判空再格式化（曾经因为直接 :.2f 而抛 TypeError，
+        #: 把整条联动启动流程打断，症状就是"内核其实起来了但界面毫无反应"）。
         self.listen_seconds: float | None = None
         self.ready_seconds: float | None = None
+        #: 是否为接管（而非本进程拉起）的实例
+        self.adopted = False
 
     # ---------------------------------------------------------------- 日志
 
@@ -281,6 +286,7 @@ class KernelClient:
         if not self._healthy(st):
             return None
         self.state = st
+        self.adopted = True
         return st
 
     def cleanup_stale(self) -> str:

@@ -202,7 +202,15 @@ class KernelBoot:
                     return out
 
                 state = self._client.ensure_running(timeout=180)
-                self._say(f"内核已启动 {state.url}（{self._client.ready_seconds:.2f}s）"
+                # ready_seconds 在"接管已有实例"时为 None，绝不能直接 :.2f ——
+                # 曾经因为这个 TypeError 打断整条启动流程（内核已起但界面无反应）
+                if getattr(self._client, "adopted", False):
+                    cost = "接管已在运行的实例，无启动计时"
+                elif isinstance(self._client.ready_seconds, (int, float)):
+                    cost = f"{self._client.ready_seconds:.2f}s"
+                else:
+                    cost = "未计时"
+                self._say(f"内核已启动 {state.url}（{cost}）"
                           f" 版本 {state.version} pid={state.pid}")
 
                 # 方向 A：必须在建会话之前把 MCP 注册好，内核启动时才连得上
@@ -210,7 +218,11 @@ class KernelBoot:
 
                 sid = None
                 if project_name:
-                    sid = self.ensure_project_session(project_name)["sessionID"]
+                    # 明确关掉这里的 TUI：是否弹终端由下面的 tui_enabled() 单点决定。
+                    # （原先用默认 True，会在 PCL_KERNEL_TUI=0 时照样弹窗 ——
+                    #   日志里会同时出现"已打开内核界面"和"不打开终端界面"两句自相矛盾的话。）
+                    sid = self.ensure_project_session(project_name,
+                                                      relaunch_tui=False)["sessionID"]
 
                 if tui_enabled():
                     self._spawn_tui(sid)
