@@ -118,12 +118,48 @@ manuscript_review 子模块不齐备"` 的**下一行**却打印着
 
 ---
 
+## 下载哪个？
+
+| 想要 | 下载 | 说明 |
+|---|---|---|
+| **单个 exe，开箱即用** | **`PCLRadiomics-onefile-with-kernel.exe`** | 146 MB，**内含内核**。双击即可，无需解压。代价：每次启动多约 **10 s** 解包（172 MB 内核要解到 `%TEMP%`），且首次启动会把内核复制到 exe 同级的 `opencode/` 目录 |
+| 启动最快 | `PCLRadiomics-windows-x64.zip` | 140 MB，解压后跑 `PCLRadiomics.exe`，冷启动约 **2.6 s**（内核在 `_internal/opencode/`） |
+| 体积最小 | `PCLRadiomics.exe` | 79 MB 单文件，**不含内核**。仅当你希望用系统里已装的 opencode 时才选它（会走 `PATH` 查找） |
+| 要在控制台敲命令配置 | `PCLRadiomicsConsole-windows-x64.zip` | console 子系统变体（PE Subsystem=3），含内核 |
+| macOS | `PCLRadiomics-v2.1.0-macos-arm64.dmg` | 130 MB，含内核 |
+
+> **单文件版为什么要复制内核？** onefile 会把内置文件解包到 `%TEMP%\_MEIxxxx`。
+> 若直接从那里启动内核，内核进程会锁住该文件，导致 PyInstaller 退出时删不掉
+> 临时目录、**父进程挂死**（实测：onedir 6 s 正常退出，onefile 150 s+ 不退出）。
+> 因此改为先从 `_MEI` 原子复制到 exe 同级的 `opencode/`，再从稳定位置启动。
+> 修复后实测 10.9 s 正常退出。
+
+---
+
 ## 分发
 
 不变：内核二进制 **172.3 MB**，超 GitHub 单文件 100 MB 硬上限，**不入库**；
 由 `pclradiomics.spec` 在构建期自动获取（离线可先跑
 `build_opencode_kernel.bat --from-source`）。`.gitignore` 已排除 `opencode/`
-（含真实 API Key 与会话数据）。单文件版按设计不含内核。
+（含真实 API Key 与会话数据）与全部 `dist*/`、`build*/` 产物目录。
+
+## 排查「双击后 opencode 没启动」
+
+联动过程会写持久日志（窗口化构建下 stderr 可能不可用，界面上也未必有反应）：
+
+```bat
+PCLRadiomics.exe kernel bootlog -n 60
+```
+
+日志在 `<程序目录>/opencode/boot.log`。常见原因：
+
+| 日志里看到 | 含义 / 处理 |
+|---|---|
+| `(无记录)` | 联动从未触发 —— 产物很可能比联动代码旧（本次实测踩到：exe 比 `kernel_boot.py` 早 36 分钟），重新打包即可 |
+| `内核模块不可用` | 同上，产物里没有 `kernel_boot` |
+| `找不到 opencode 可执行文件` | 用了不含内核的单文件版；换含内核的版本，或设 `PCL_OPENCODE_EXE` |
+| `联动已跳过（--shot/--demo/--e2e）` | 自动化模式，属预期 |
+| `联动已跳过（PCL_KERNEL_AUTOSTART=0）` | 被开关关掉了 |
 
 ## 从 v2.0.0 升级
 
