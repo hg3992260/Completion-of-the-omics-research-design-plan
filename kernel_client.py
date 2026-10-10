@@ -210,6 +210,36 @@ class KernelClient:
 
     # ------------------------------------------------------------ 孤儿清理
 
+    def adopt_state(self) -> KernelState | None:
+        """若状态文件记录的实例仍存活且健康，**接管**它。
+
+        为什么必须接管：`cli.py kernel ...` 每次都是新进程，若只"报告复用"
+        而不接管，每个命令都会再起一个内核 —— 实测踩到连跑三条命令留下三个
+        内核进程（各占 300+ MB）。GUI 是长驻进程所以不明显，控制台用法会漏。
+        """
+        path = kernel_state_file()
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                old = json.load(fh)
+        except Exception:                                              # noqa: BLE001
+            return None
+        pid = int(old.get("pid") or 0)
+        port = int(old.get("port") or 0)
+        password = old.get("password") or ""
+        if not (pid and port and password):
+            return None
+        if not self._pid_alive(pid):
+            return None
+        st = KernelState(pid, port, password,
+                         version=str(old.get("version") or ""),
+                         home=old.get("home") or kernel_home())
+        if not self._healthy(st):
+            return None
+        self.state = st
+        return st
+
     def cleanup_stale(self) -> str:
         """清掉上次遗留的内核实例。返回人类可读的处置说明。"""
         path = kernel_state_file()
@@ -224,7 +254,7 @@ class KernelClient:
         pid = int(old.get("pid") or 0)
         port = int(old.get("port") or 0)
         if pid and self._pid_alive(pid) and self._port_serving(port, pid):
-            return f"上一实例仍在运行（pid={pid} port={port}），复用"
+            return f"上一实例仍在运行（pid={pid} port={port}），将由 adopt_state 接管"
         if pid and self._pid_alive(pid):
             try:
                 self._kill(pid)
@@ -268,10 +298,16 @@ class KernelClient:
     # ---------------------------------------------------------------- 启动
 
     def ensure_running(self, timeout: float = 90.0) -> KernelState:
-        """懒启动：已在运行则复用，否则拉起并等到 health 通过。"""
+        """懒启动：已在本进程内运行则复用；状态文件里有存活实例则接管；
+        否则拉起并等到 health 通过。"""
         if self.state and self._pid_alive(self.state.pid) and self._healthy(self.state):
-            self._log("复用已运行的内核")
+            self._log("复用本进程已持有的内核")
             return self.state
+
+        adopted = self.adopt_state()
+        if adopted:
+            self._log(f"接管已运行的内核 {adopted.url}（pid={adopted.pid}）")
+            return adopted
 
         if not self.exe:
             raise KernelError(
@@ -410,6 +446,18 @@ class KernelClient:
         if location:
             body["location"] = location
         return self.request("POST", "/api/session", body or None)
+
+    def session_exists(self, session_id: str) -> bool:
+        sid = urllib.parse.quote(session_id, safe="")
+        try:
+            self.request("GET", f"/api/session/{sid}", timeout=20)
+            return True
+        except KernelError:
+            return False
+
+    def session_get(self, session_id: str) -> dict:
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("GET", f"/api/session/{sid}", timeout=20)
 
     def prompt(self, session_id: str, text: str, *, delivery: str | None = None,
                resume: bool | None = None) -> dict:
@@ -559,11 +607,16 @@ class KernelClient:
     def spawn_tui(self, project_dir: str | None = None,
                   session_id: str | None = None, continue_last: bool = False,
                   via_powershell: bool = True) -> subprocess.Popen:
-        """拉起内核 TUI：新控制台窗口 + `opencode attach` 到隔离实例。
+        """拉起内核 TUI：新终端窗口 + `opencode attach` 到隔离实例。
 
         必须用 attach 而不是裸跑 opencode —— 裸跑会自建 server，
         与常驻实例争用同一个 sqlite（风险 19）。
         密码走 OPENCODE_SERVER_PASSWORD，不进命令行（风险 21）。
+
+        平台差异（用户要求"显示为系统的 console 或 mac 的 bash"）：
+          Windows  新控制台窗口（CREATE_NEW_CONSOLE），默认套 PowerShell
+          macOS    用 osascript 让 Terminal.app 执行同一条 attach 命令
+          Linux    无统一终端，回落为直接 spawn（继承当前终端）
         """
         if not self.exe or not self.state:
             raise KernelError("内核未启动")
@@ -576,13 +629,33 @@ class KernelClient:
         elif continue_last:
             attach += ["--continue"]
 
+        env = kernel_env(st.password)          # 与 server 共用同一份环境（风险 20）
+
+        # ---- macOS：走 Terminal.app，得到用户熟悉的 bash ----
+        if sys.platform == "darwin":
+            import shlex
+            inner = " ".join(shlex.quote(a) for a in attach)
+            # 用 env 前缀把密码与隔离 home 一起带过去；密码不进命令行
+            env_prefix = " ".join(
+                f"{k}={shlex.quote(env[k])}"
+                for k in ("OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME",
+                          "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+                          "XDG_CACHE_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CLIENT")
+                if k in env
+            )
+            script = (f'tell application "Terminal" to do script '
+                      f'"cd {shlex.quote(target)} && {env_prefix} {inner}"')
+            self._log("拉起 TUI（macOS Terminal）")
+            return subprocess.Popen(["osascript", "-e", script],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # ---- Windows / Linux ----
         if via_powershell and os.name == "nt":
             quoted = " ".join(f"'{a}'" for a in attach)
             cmd = ["powershell.exe", "-NoExit", "-Command", f"& {quoted}"]
         else:
             cmd = attach
 
-        env = kernel_env(st.password)          # 与 server 共用同一份环境（风险 20）
         creationflags = 0
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
@@ -592,15 +665,20 @@ class KernelClient:
     # ------------------------------------------------------------- 停止
 
     def stop(self, timeout: float = 8.0) -> str:
-        """优雅停止：先 terminate，超时再强杀。"""
-        state = self.state
+        """优雅停止：先 terminate，超时再强杀。
+
+        没有本进程句柄时（例如 `cli.py kernel stop` 是独立进程），
+        退回到状态文件记录的实例并强杀 —— 否则跨进程根本停不掉内核。
+        """
         proc = self._proc
-        if not proc and state:
-            if self._pid_alive(state.pid):
-                self._kill(state.pid)
-                return f"已强杀 pid={state.pid}"
-            return "无运行中的内核"
         if not proc:
+            st = self.state or self.adopt_state()
+            if st and self._pid_alive(st.pid):
+                self._kill(st.pid)
+                self._remove_state_file()
+                self.state = None
+                return f"已停止 pid={st.pid}（无本进程句柄，按强杀处理）"
+            self._remove_state_file()
             return "无运行中的内核"
         if proc.poll() is None:
             proc.terminate()
@@ -608,13 +686,19 @@ class KernelClient:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._kill(proc.pid)
+                self._remove_state_file()
+                self.state = None
                 return f"超时，已强杀 pid={proc.pid}"
+        self._remove_state_file()
+        self.state = None
+        return "已优雅停止"
+
+    @staticmethod
+    def _remove_state_file() -> None:
         try:
             os.remove(kernel_state_file())
         except OSError:
             pass
-        self.state = None
-        return "已优雅停止"
 
 
 # ------------------------------------------------------------------ 便捷入口

@@ -382,6 +382,66 @@ def cmd_config(args) -> int:
     return 2
 
 
+def cmd_boot(args) -> int:
+    """一键拉起完整联动：内核 + 宿主 MCP 注册 + 项目 session + 可见终端 TUI。
+
+    与「打开 GUI」时自动发生的动作完全一致，便于在控制台复现/排障。
+    """
+    import kernel_boot as kb
+    boot = kb.instance()
+    out = boot.start(args.project)
+    if args.json:
+        _out({**out, "status": boot.status()}, True)
+    else:
+        if out.get("ok"):
+            print(f"内核     {out.get('url')}")
+            print(f"方向 A   {out.get('mcp') or '(未注册)'}")
+            print(f"session  {out.get('sessionID') or '(未绑定)'}")
+            st = boot.status()
+            print(f"TUI pid  {st.get('tui_pid') or '(未打开)'}")
+            if not kb.tui_enabled():
+                print("提示     已设 PCL_KERNEL_TUI=0，未打开终端界面")
+        else:
+            print(f"失败：{out.get('error')}")
+    return 0 if out.get("ok") else 1
+
+
+def cmd_project(args) -> int:
+    """项目 ↔ opencode session 绑定（GUI 切项目时自动做的同一件事）。"""
+    if args.action == "list":
+        mapping = kcfg.read_projects_map()
+        if args.json:
+            _out(mapping, True)
+        else:
+            print(f"映射文件 {kcfg.projects_map_file()}")
+            if not mapping:
+                print("（空）")
+            for name, entry in sorted(mapping.items()):
+                sid = entry.get("sessionID") if isinstance(entry, dict) else entry
+                print(f"  {name:32s} → {sid}")
+        return 0
+
+    if args.action == "unbind":
+        ok = kcfg.unbind_project_session(args.name or "")
+        _out({"ok": ok, "project": args.name}, args.json)
+        return 0 if ok else 1
+
+    # ensure / switch 都需要内核在跑
+    import kernel_boot as kb
+    boot = kb.instance()
+    if not (boot._client and boot._client.state):
+        # 只起内核，不弹 TUI（除非是 switch）
+        import kernel_client as _kc
+        boot._client = boot._client or _kc.KernelClient(exe=args.exe or _kc.opencode_exe())
+        boot._client.ensure_running(timeout=args.timeout)
+        boot._mcp_url = boot._ensure_host_mcp()
+
+    relaunch = (args.action == "switch") and not args.no_tui
+    got = boot.ensure_project_session(args.name or "未命名项目", relaunch_tui=relaunch)
+    _out({"ok": True, **got, "relaunch_tui": relaunch}, args.json)
+    return 0
+
+
 def cmd_selftest(args) -> int:
     """不打网络、不依赖密钥的自检：路径 / 二进制 / 配置 / 技能 / MCP 端点。"""
     ok = True
@@ -504,6 +564,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ms", type=int, default=kcfg.MCP_TIMEOUT_MS)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_config)
+
+    p = sub.add_parser("boot", help="一键拉起完整联动（内核 + 宿主 MCP + 项目 session + 终端 TUI）")
+    p.add_argument("--project", default=None, help="要绑定的项目名")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_boot)
+
+    p = sub.add_parser("project", help="项目 ↔ opencode session 绑定")
+    p.add_argument("action", choices=["list", "ensure", "switch", "unbind"])
+    p.add_argument("--name", default=None)
+    p.add_argument("--exe", default=None)
+    p.add_argument("--timeout", type=float, default=180.0)
+    p.add_argument("--no-tui", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_project)
 
     p = sub.add_parser("selftest", help="离线自检（路径/二进制/配置/技能/MCP 端点）")
     p.set_defaults(fn=cmd_selftest)

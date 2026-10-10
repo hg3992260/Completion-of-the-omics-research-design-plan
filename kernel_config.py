@@ -381,6 +381,62 @@ def list_agents() -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ 项目 ↔ 会话
+#
+#  用户澄清的架构要求之一：在 GUI 上切换项目时，opencode 要能**新建或切换到
+#  对应 session**。会话本体在内核里（走官方 HTTP API 创建），这里只保存
+#  「项目名 → sessionID」这张映射表。
+#
+#  放在内核 home 下（已 gitignore），与内核数据同生命周期；不写进项目 JSON，
+#  因为项目 JSON 是可分发/可备份的用户数据，不该掺入本机内核状态。
+
+def projects_map_file() -> str:
+    return os.path.join(kernel_home(), "projects.json")
+
+
+def read_projects_map() -> dict:
+    path = projects_map_file()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:                                                  # noqa: BLE001
+        return {}
+
+
+def write_projects_map(mapping: dict) -> str:
+    path = projects_map_file()
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(mapping or {}, fh, ensure_ascii=False, indent=2)
+    return path
+
+
+def get_project_session(project: str) -> str | None:
+    entry = read_projects_map().get(project)
+    if isinstance(entry, dict):
+        sid = entry.get("sessionID")
+        return str(sid) if sid else None
+    return str(entry) if entry else None
+
+
+def bind_project_session(project: str, session_id: str, title: str | None = None) -> str:
+    mapping = read_projects_map()
+    mapping[project] = {"sessionID": session_id, "title": title or project,
+                        "bound_at": int(__import__("time").time())}
+    return write_projects_map(mapping)
+
+
+def unbind_project_session(project: str) -> bool:
+    mapping = read_projects_map()
+    if project not in mapping:
+        return False
+    mapping.pop(project, None)
+    write_projects_map(mapping)
+    return True
+
+
 # --------------------------------------------------------------------------- 总览
 
 def summary() -> dict:

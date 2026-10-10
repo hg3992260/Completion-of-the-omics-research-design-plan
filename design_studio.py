@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import subprocess
+import threading
 import time
 
 # --------------------------------------------------------------------------- 解释器自举
@@ -2499,6 +2500,9 @@ def make_flex(widget, min_w: int = 160, min_h: int = 60, vertical: str = "expand
 
 # --------------------------------------------------------------------------- 主窗口
 class StudioWindow(CMainWindow):
+    #: 内核联动是后台线程跑的，结果必须 marshal 回 GUI 线程再动控件
+    kernel_event = QtCore.Signal(str)
+
     def __init__(self, demo: bool = False):
         sw, sh, sx, sy = screen_size(1520, 960, 1180, 720)
         super().__init__(width=sw, height=sh, x=sx, y=sy, title="组学研究设计工作台",
@@ -2514,6 +2518,10 @@ class StudioWindow(CMainWindow):
         self.answer_rows = []
         self.pending_draft = ""
         self.final_mode = False
+        # 内嵌 opencode 内核联动（打开 GUI 即启动内核 + 弹终端 + 项目↔session 绑定）
+        self._kboot = None
+        self._kboot_ready = False
+        self.kernel_event.connect(self._on_kernel_event)
         install_button_skin()          # 保证任何构造路径下按钮都有立体皮肤
 
         root = QVBoxLayout()
@@ -3471,6 +3479,82 @@ class StudioWindow(CMainWindow):
         box.setCurrentText(self.project.name)
         box.blockSignals(False)
 
+    # ------------------------------------------- 内嵌 opencode 内核联动
+    #
+    #  用户澄清的架构（opencode-embedding-plan.md §2.1）：
+    #    · 本程序是 opencode 内核的 MCP 服务（方向 A）
+    #    · 打开 GUI 即启动内核，并在独立终端窗口显示它的界面
+    #    · GUI 切项目 → 内核新建/切换到对应 session
+    #    · 在那个终端里可用 opencode 下达全自动命令驱动本程序
+    #
+    #  全部在后台线程里跑：内核冷启动 ~1s，但不能阻塞 GUI 首屏；
+    #  也不走 _busy() 的单槽守卫（那是给一次性 LLM 调用设计的）。
+    def _on_kernel_event(self, text: str):
+        """后台线程的内核消息回到 GUI 线程（Qt 信号已保证线程正确）。"""
+        try:
+            box = getattr(self, "transcript", None)
+            if box is not None:
+                box.add_text_block(text, "muted", 9.5)
+        except Exception:                                              # noqa: BLE001
+            pass
+        try:
+            lbl = getattr(self, "left_status", None)
+            if lbl is not None and hasattr(lbl, "label"):
+                lbl.label().setText(text if len(text) <= 60 else text[:57] + "…")
+        except Exception:                                              # noqa: BLE001
+            pass
+
+    def kernel_boot_async(self):
+        """打开 GUI 即启动内核 + 弹终端 + 绑定当前项目 session。"""
+        try:
+            import kernel_boot as kb
+        except Exception as e:                                         # noqa: BLE001
+            self.kernel_event.emit(f"内核模块不可用：{type(e).__name__}: {e}")
+            return
+        skip = kb.should_skip_for_mode()
+        if skip:
+            self.kernel_event.emit(f"内核联动已跳过（{skip}）")
+            return
+        self._kboot = kb.instance()
+        self._kboot_ready = True
+        project = self.project.name
+
+        def worker():
+            try:
+                out = self._kboot.start(project)
+                if out.get("ok"):
+                    self.kernel_event.emit(
+                        f"opencode 内核已启动 {out.get('url')}"
+                        + (f"｜内核可用 {out.get('mcp')}" if out.get("mcp") else ""))
+                else:
+                    self.kernel_event.emit(f"内核启动失败：{out.get('error')}")
+            except Exception as e:                                     # noqa: BLE001
+                self.kernel_event.emit(f"内核启动异常：{type(e).__name__}: {e}")
+
+        threading.Thread(target=worker, name="kernel-boot", daemon=True).start()
+
+    def kernel_switch_project(self, project_name: str):
+        """GUI 切项目 → 内核新建/切换到对应 session，并让终端界面跟过去。"""
+        if not self._kboot_ready or self._kboot is None:
+            return
+        boot = self._kboot
+
+        def worker():
+            try:
+                boot.switch_project(project_name)
+            except Exception as e:                                     # noqa: BLE001
+                self.kernel_event.emit(f"切项目联动失败：{type(e).__name__}: {e}")
+
+        threading.Thread(target=worker, name="kernel-switch", daemon=True).start()
+
+    def kernel_shutdown(self):
+        """关窗时收掉我们拉起的 TUI 与内核进程，避免孤儿。"""
+        if self._kboot and self._kboot_ready:
+            try:
+                self._kboot.stop()
+            except Exception:                                          # noqa: BLE001
+                pass
+
     def _on_project_pick(self, name: str):
         if not name or name == self.project.name:
             return
@@ -3542,6 +3626,9 @@ class StudioWindow(CMainWindow):
         self._toast(f"当前项目：{project.name}")
         # 双向联动（课题 → 手稿）：切到哪个课题，就自动切到它绑定的手稿审阅
         self._sync_mr_to_project(project, announce=announce)
+        # 内核联动（课题 → opencode session）：切到哪个课题，就新建/切到它的 session，
+        # 并让那个终端里的 opencode 界面跟过去（用户澄清的架构要求之一）
+        self.kernel_switch_project(project.name)
 
     # ---------------------------------------------------------------- 课题 ⇄ 手稿联动
     def _sync_mr_to_project(self, project, announce: bool = True) -> None:
@@ -3718,6 +3805,8 @@ class StudioWindow(CMainWindow):
                 if not th.wait(6000):
                     th.terminate()
                     th.wait(1000)
+        # 收掉我们拉起的 opencode 内核与它的终端窗口，避免留下孤儿进程
+        self.kernel_shutdown()
         super().closeEvent(event)
 
     def open_settings(self):
@@ -4684,6 +4773,10 @@ def main(argv):
         timer.start(900)
 
     win.show()
+    # 打开 GUI 即启动内嵌 opencode 内核：拉起内核 + 把本程序注册成它的 MCP 服务
+    # + 在独立终端窗口里显示内核界面 + 绑定当前项目的 session。
+    # 全程后台线程，不阻塞首屏；--shot/--e2e/--demo 自动跳过。
+    win.kernel_boot_async()
     return app.exec()
 
 

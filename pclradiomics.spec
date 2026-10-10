@@ -80,7 +80,7 @@ elif SKIP_KERNEL:
 HIDDEN = ["app_paths", "stages_data", "llm_client", "design_agent",
           "mcp_server", "api_server", "cli", "ui_kit", "design_studio", "omics_pipeline",
           "win_stdio", "docx_export", "manuscript_review",
-          "kernel_client", "kernel_config", "kernel_cli"]
+          "kernel_client", "kernel_config", "kernel_cli", "kernel_boot"]
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi",
             "h11", "PyCt6"):

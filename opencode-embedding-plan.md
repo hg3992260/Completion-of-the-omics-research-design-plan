@@ -558,7 +558,50 @@ P0 起初尝试从源码构建，遇到四个问题，改用 release 二进制�
 
 > **建议**：默认交付走 **release 二进制**（CI 构建、已签名、可复现），`build_opencode_kernel.bat` 仅作为"需要打补丁/离线"时的备选。release 资产命名固定为 `opencode-windows-x64.zip`，与内置版本号 `1.18.35` 对应，便于脚本校验。
 
+### 9.7 用户澄清后的最终运行时行为（已实现）
+
+用户在看过初版后澄清了四条，其中两条把原先的"手动"改成了"必须自动"。已实现：
+
+| # | 用户要求 | 实现 | 验收 |
+|---|---|---|---|
+| 1 | **GUI 程序是 opencode 内核的 MCP 服务** | `mcp_server.serve_http_in_thread()` 在 GUI 进程内起 streamable-http 端点，并写进内核 `opencode.json` 的 `mcp` 段 | 已端到端验证（§9.5 方向 A）；`opencode mcp list` 显示 connected |
+| 2 | **打开 GUI 就同时启动 opencode，并显示为系统的 console / mac 的 bash** | `design_studio` 在 `win.show()` 后调用 `StudioWindow.kernel_boot_async()`；`kernel_boot.KernelBoot.start()` 起内核 + 注册 MCP + 建会话 + `kernel_client.spawn_tui()` 在**独立终端窗口** attach 同一实例<br>Windows：新 PowerShell/conhost 窗口（`CREATE_NEW_CONSOLE`）<br>macOS：`osascript` 让 Terminal.app 执行同一 attach 命令<br>Linux：回到当前终端 | 需在真机 GUI 上验（本次仅验证到 `spawn_tui` 的构造与 attach 命令正确） |
+| 3 | **GUI 切项目 → opencode 新建/切换到对应 session** | 项目↔session 映射存 `<kernel_home>/projects.json`；`_switch_project()`（**所有项目切换的唯一汇聚点**）末尾调 `kernel_switch_project()`；`KernelBoot.ensure_project_session()` 复用已有 session，不存在才新建，并让 TUI 重新 attach | ✅ 已实测：首次 `created=true`、再次 `created=false` 且 sessionID 相同、不同项目各自独立 |
+| 4 | **在 console 用 opencode 下全自动命令驱动 GUI 功能** | 由方向 A 保证（21 个领域工具对内核可见可调） | ✅ 已实测（§9.5） |
+
+**开关**（避免干扰既有自动化）：
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `PCL_KERNEL_AUTOSTART` | `1` | GUI 启动时是否拉起内核 |
+| `PCL_KERNEL_TUI` | `1` | 是否自动弹出内核终端窗口 |
+| `PCL_SKIP_KERNEL` | `0` | 打包时是否排除内核二进制 |
+
+`--shot` / `--e2e` / `--demo` 三种自动化模式**自动跳过**内核联动（`should_skip_for_mode()`）。
+
+**控制台对等命令**（与 GUI 启动时做的完全同一件事，便于复现与排障）：
+
+```bat
+PCLRadiomics.exe kernel boot --project "某课题"   :: 起内核+注册MCP+绑会话+开终端
+PCLRadiomics.exe kernel project list              :: 项目↔session 映射
+PCLRadiomics.exe kernel project ensure --name X   :: 确保 X 有 session（复用或新建）
+PCLRadiomics.exe kernel project switch --name X   :: 同上并让终端跟过去
+PCLRadiomics.exe kernel project unbind --name X
+```
+
+### 9.8 实测修掉的两个内核进程管理 bug
+
+这两个都是"控制台用法"才会暴露、GUI 长驻进程掩盖了的问题：
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | **每敲一条 `cli.py kernel ...` 就多一个内核进程**（实测连跑三条留下 3 个，各占 300+ MB） | `ensure_running()` 里 `cleanup_stale()` 只"报告复用"，并不真正**接管**状态文件里的存活实例，于是每次都再 spawn 一个 | 新增 `adopt_state()`：状态文件里的实例存活且 health 通过就直接接管为 `self.state`；`ensure_running()` 先尝试接管 |
+| 2 | **`kernel stop` 跨进程停不掉内核**（报"无运行中的内核"） | `stop()` 只看 `self._proc`（本进程句柄），新进程里它是 `None`；状态文件里的 pid 被忽略 | `stop()` 无句柄时退回 `adopt_state()` 并按强杀处理，同时删除状态文件 |
+
+> 注：验证时发现机器上另有 `C:\Users\chris\AppData\Local\npm-global\...\opencode.exe`（用户自己 npm 全局安装的 opencode，pid 11996，10/9 启动）。它不是我们拉起的，**未做处理** —— 隔离设计（独立 home、独立端口、独立密码）本就保证两者互不干扰。
+
 ---
+
 
 ## 10. 风险清单
 

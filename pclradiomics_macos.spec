@@ -47,7 +47,7 @@ if os.path.exists(KERNEL_EXE_MAC):
 MODULES = ["app_paths", "stages_data", "llm_client", "design_agent",
            "mcp_server", "api_server", "cli", "win_stdio",
            "docx_export", "manuscript_review",
-           "kernel_client", "kernel_config", "kernel_cli"]
+           "kernel_client", "kernel_config", "kernel_cli", "kernel_boot"]
 HIDDEN = list(MODULES)
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi", "h11"):
