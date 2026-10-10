@@ -35,9 +35,19 @@ datas += collect_data_files("PyCt6")       # 自带主题 JSON，缺了界面会
 datas += collect_data_files("mcp")
 datas += collect_data_files("docx")   # python-docx 的默认模板 templates/default.docx 必须一起打包，否则导出 Word 会失败
 
+# —— 内嵌 opencode 内核（Windows 走 pclradiomics.spec，macOS 为可选）——
+# v2.0.0 的内核嵌入以 Windows 为完整目标；macOS 这里只收集**内核客户端代码**，
+# 使 `kernel` 子命令不会 ImportError，并在找不到二进制时由 kernel selftest 明确报错。
+# 若在 macOS 上跑过 get_opencode_kernel.py（会下 darwin 版，约 43 MB 压缩），
+# 则一并打进产物，macOS 也能获得完整内核能力。
+KERNEL_EXE_MAC = os.path.join(ROOT, "opencode", "opencode")
+if os.path.exists(KERNEL_EXE_MAC):
+    datas.append((KERNEL_EXE_MAC, "opencode"))
+
 MODULES = ["app_paths", "stages_data", "llm_client", "design_agent",
            "mcp_server", "api_server", "cli", "win_stdio",
-           "docx_export", "manuscript_review"]
+           "docx_export", "manuscript_review",
+           "kernel_client", "kernel_config", "kernel_cli"]
 HIDDEN = list(MODULES)
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi", "h11"):

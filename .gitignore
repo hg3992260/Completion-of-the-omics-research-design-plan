@@ -7,6 +7,11 @@ ui_prefs.json
 error.log
 研究设计_*
 
+# 内嵌 opencode 内核：二进制（172 MB，超 GitHub 100 MB 单文件上限）
+# 与它运行期产生的全部状态（含 auth.json 里的 API Key、会话 sqlite、snapshot git 对象）
+# —— 一律不入库。CI 构建时用 build_opencode_kernel.bat / 工作流步骤下载。
+opencode/
+
 # 打包产物与缓存
 build/
 dist/

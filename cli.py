@@ -14,6 +14,16 @@
         ... --toolchain                    外部依赖（OfficeCLI / PyMuPDF）就绪情况
         ... --layers-info                  三层审阅条目统计
         ... <手稿.docx|pdf>                直接跑审阅并自动落盘
+    pclradiomics.exe kernel ...             内嵌 opencode 内核的控制台配置面
+        ... status                         总览：二进制/进程/配置/凭据/技能
+        ... selftest                       离线自检（排查「内核有没有打进 exe」）
+        ... auth set <provider> <key>      配 API Key（写 opencode 自己的 auth.json）
+        ... auth import-host               复用宿主凭据链的密钥
+        ... skill list|add|remove          配技能（写 opencode 自己的 SKILL.md）
+        ... session list|new|prompt        会话管理（走内核官方 HTTP API）
+        ... model list|set                 模型（以 opencode models 为准）
+        ... mcp host|list|status           把宿主 21 个领域工具暴露给内核
+        ... ui                             在独立控制台窗口里拉起 opencode TUI
 
 不传子命令时按 exe 名判断：含 "服务"/"serve" 则进服务模式，否则进界面。
 """
@@ -138,6 +148,17 @@ def cmd_manuscript(argv: list) -> int:
     return mr_cli.main(argv)
 
 
+def cmd_kernel(argv: list) -> int:
+    """内嵌 opencode 内核的控制台配置面（session / skill / apikey / model / mcp）。
+
+    存在的意义：宿主的「与 opencode 一致」要求 session、skill、API Key 都能在
+    控制台里配置，且配置写的是 opencode 自己的文件（不另起一套真值）。
+    见 kernel_cli.py 与 opencode-embedding-plan.md §5。
+    """
+    import kernel_cli
+    return kernel_cli.main(argv)
+
+
 def cmd_mcp(argv: list) -> int:
     import mcp_server
     sys.argv = ["mcp_server"] + argv
@@ -260,7 +281,8 @@ def cmd_net(argv: list) -> int:
 
 COMMANDS = {"gui": cmd_gui, "net": cmd_net, "mcp": cmd_mcp, "api": cmd_api, "serve": cmd_api,
             "stages": cmd_stages, "projects": cmd_projects, "paths": cmd_paths,
-            "check": cmd_check, "manuscript_review": cmd_manuscript, "mr": cmd_manuscript}
+            "check": cmd_check, "manuscript_review": cmd_manuscript, "mr": cmd_manuscript,
+            "kernel": cmd_kernel}
 
 
 def main(argv: list | None = None) -> int:

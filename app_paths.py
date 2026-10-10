@@ -17,7 +17,9 @@ import sys
 
 APP_NAME = "PCLRadiomics"
 # 发布版本：与 git tag / GitHub Release 保持一致
-APP_VERSION = "1.3.0"
+# v2.0.0 = 内嵌 opencode 内核（session/skill/apikey 控制台配置 + 21 个领域工具
+#          通过 MCP 暴露给内核），见 opencode-embedding-plan.md
+APP_VERSION = "2.0.0"
 
 
 def is_frozen() -> bool:

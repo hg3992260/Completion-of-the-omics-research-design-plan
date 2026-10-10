@@ -30,6 +30,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -621,6 +622,115 @@ def main() -> None:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport=args.transport)
+
+
+# ---------------------------------------------------------------------------
+#  进程内战 streamable-http（方向 A 用）
+#
+#  背景：内嵌的 opencode 内核是 MCP 客户端，它要调用本程序的 21 个领域工具。
+#  因此宿主 GUI 进程必须在跑界面的同时，把 MCP 端点暴露出来，内核通过
+#  <config>/opencode.json 的 mcp 段以 type:"remote" 连过来。
+#
+#  可行性已实测：uvicorn 的 Server.capture_signals() 在非主线程会直接跳过信号
+#  捕获，因此 `mcp.run(transport="streamable-http")` 可以在后台线程里正常起，
+#  并返回正确的 MCP initialize 响应（见 _mcp_thread_probe.py）。
+#
+#  已知限制：FastMCP 未暴露底层 uvicorn Server 句柄，所以**无法在进程内优雅
+#  停止**该端点。它随 GUI 进程存活，进程退出即随之结束 —— 这对"GUI 进程同时
+#  暴露端点"的语义是合适的，也避免了一个端口被反复抢占/释放的竞态。
+# ---------------------------------------------------------------------------
+
+_http_lock = threading.Lock()
+_http_state: dict = {"thread": None, "host": None, "port": None, "url": None, "error": None}
+
+
+def _free_port(host: str = "127.0.0.1") -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind((host, 0))
+        return int(s.getsockname()[1])
+
+
+def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def serve_http_in_thread(host: str = "127.0.0.1", port: int | None = None,
+                         wait: float = 30.0, attempts: int = 5) -> dict:
+    """在后台线程里起 streamable-http 端点，返回 {ok, url, port, ...}。
+
+    幂等：已在运行则直接返回既有状态（不重复起第二个端点）。
+    port 为空则自动挑一个空闲端口（避免与 web_server 8787 / api_server 8788 /
+    mcp 默认 8765 冲突）。
+    """
+    with _http_lock:
+        if _http_state.get("url") and _http_state.get("thread") \
+                and _http_state["thread"].is_alive() and _port_open(_http_state["host"], _http_state["port"]):
+            return {"ok": True, "already": True, "url": _http_state["url"],
+                    "port": _http_state["port"], "host": _http_state["host"]}
+
+    last_error: BaseException | None = None
+    for _ in range(max(1, attempts)):
+        chosen = port or _free_port(host)
+        errors: list[BaseException] = []
+
+        def _run() -> None:
+            try:
+                mcp.settings.host = host
+                mcp.settings.port = chosen
+                mcp.run(transport="streamable-http")
+            except BaseException as e:                                 # noqa: BLE001
+                errors.append(e)
+
+        t = threading.Thread(target=_run, name="pcl-mcp-http", daemon=True)
+        t.start()
+
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if errors:
+                last_error = errors[0]
+                break
+            if not t.is_alive():
+                last_error = RuntimeError("MCP HTTP 线程提前退出")
+                break
+            if _port_open(host, chosen):
+                url = f"http://{host}:{chosen}/mcp"
+                with _http_lock:
+                    _http_state.update({"thread": t, "host": host, "port": chosen,
+                                        "url": url, "error": None})
+                return {"ok": True, "already": False, "url": url,
+                        "port": chosen, "host": host}
+            time.sleep(0.3)
+
+    with _http_lock:
+        _http_state["error"] = f"{type(last_error).__name__}: {last_error}" if last_error else "超时"
+    return {"ok": False, "error": _http_state["error"]}
+
+
+def http_status() -> dict:
+    """当前进程内 MCP 端点状态（只读，不启动任何东西）。"""
+    st = dict(_http_state)
+    thread = st.get("thread")
+    st["thread"] = bool(thread and thread.is_alive())
+    if st.get("port"):
+        st["serving"] = _port_open(st["host"], st["port"])
+    else:
+        st["serving"] = False
+    return st
+
+
+def tool_count() -> int:
+    """已注册的 MCP 工具数（自检用）。"""
+    import asyncio
+    try:
+        return len(asyncio.run(mcp.list_tools()))
+    except Exception:                                                  # noqa: BLE001
+        return -1
 
 
 if __name__ == "__main__":

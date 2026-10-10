@@ -23,7 +23,10 @@ import os
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = os.path.abspath(os.getcwd())
-APP_NAME = "PCLRadiomics"
+# 产物名可用 PCL_APP_NAME 覆盖 —— 双变体必需：
+#   PCLRadiomics.exe（windowed 主程序）与 PCLRadiomicsConsole.exe（console 子系统）
+#   若都叫 PCLRadiomics 会互相覆盖（见 opencode-embedding-plan.md §4.2 风险 13）。
+APP_NAME = os.environ.get("PCL_APP_NAME") or "PCLRadiomics"
 ONEFILE = os.environ.get("PCL_ONEFILE", "") not in ("", "0", "false", "False")
 # 合并版默认 windowed：图形模式没有黑框；stdio MCP 由 win_stdio 接管父进程管道
 CONSOLE = os.environ.get("PCL_CONSOLE", "") not in ("", "0", "false", "False")
@@ -36,9 +39,28 @@ datas += collect_data_files("PyCt6")       # PyCt6 自带主题 JSON，缺了界
 datas += collect_data_files("mcp")
 datas += collect_data_files("docx")   # python-docx 的默认模板 templates/default.docx 必须一起打包，否则导出 Word 会失败
 
+# —— 内嵌 opencode 内核二进制（172 MB）——
+# 为何不入库：GitHub 单文件硬上限 100 MB。故由 build_opencode_kernel.bat / CI 步骤
+# 下载 release zip 解压到 opencode/，打包时再打进去。
+# 放在 datas 的 "opencode" 目标下 → 冻结后落在 _internal/opencode/opencode.exe，
+# 由 kernel_client.opencode_exe() 经 resource_path 找到（不放进 binaries：
+# 那是预编译依赖目录，会被依赖分析/strip 处理，而这是个自带运行时的独立 exe）。
+SKIP_KERNEL = os.environ.get("PCL_SKIP_KERNEL", "") not in ("", "0", "false", "False")
+KERNEL_EXE = os.path.join(ROOT, "opencode", "opencode.exe")
+if os.path.exists(KERNEL_EXE):
+    datas.append((KERNEL_EXE, "opencode"))
+elif not SKIP_KERNEL:
+    raise SystemExit(
+        "[打包中止] 未找到内嵌内核 opencode\\opencode.exe。\n"
+        "  · CI/本地请先运行 build_opencode_kernel.bat，或手动把 v1.18.35 的\n"
+        "    opencode-windows-x64.zip 解压到 opencode/ 目录；\n"
+        "  · 若确实要打一个不含内核的版本，设 PCL_SKIP_KERNEL=1。"
+    )
+
 HIDDEN = ["app_paths", "stages_data", "llm_client", "design_agent",
           "mcp_server", "api_server", "cli", "ui_kit", "design_studio", "omics_pipeline",
-          "win_stdio", "docx_export", "manuscript_review"]
+          "win_stdio", "docx_export", "manuscript_review",
+          "kernel_client", "kernel_config", "kernel_cli"]
 for pkg in ("mcp", "anyio", "httpx", "httpcore", "starlette", "uvicorn",
             "sse_starlette", "pydantic", "pydantic_core", "sniffio", "certifi",
             "h11", "PyCt6"):
@@ -73,7 +95,7 @@ HIDDEN += _collect_local(("manuscript_review",))
 #    任何一个导入失败都说明它自己或它依赖的本地模块没被收集，直接中止而不是产出坏包。
 _probe_fail = []
 for _m in ("design_studio", "omics_pipeline", "manuscript_review", "docx_export",
-           "mcp_server", "api_server"):
+           "mcp_server", "api_server", "kernel_client", "kernel_config", "kernel_cli"):
     try:
         __import__(_m)
     except Exception as _e:                                        # noqa: BLE001
