@@ -17,8 +17,71 @@ CLAIM / RQS / IBSI / MIAPE / MSI）：
 
 ## 版本
 
-**当前版本：`v1.3.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
+**当前版本：`v2.0.0`** —— 单一版本来源是 `app_paths.APP_VERSION`，与 git tag / GitHub Release 保持一致
 （推理 API 的 `Server` 头与 macOS 打包的 `CFBundleVersion` 都读它）。
+
+### v2.0.0 · 内嵌 opencode 内核
+
+把 **opencode** 作为 agent 内核嵌进本程序，并让本程序成为该内核的 **MCP 工具提供方**。
+于是内核能自主串起多步任务（读手稿 → 跑确定性信号 → 调 LLM 分层审阅 → 写回 Word），
+中间不再需要人手点每一步。
+
+**四个角色、两个方向**（完整设计见 [`opencode-embedding-plan.md`](opencode-embedding-plan.md)）：
+
+| # | 关系 | 方向 | 协议 | 谁主动 |
+|---|---|---|---|---|
+| **A** | 内核调用本程序的领域能力 | **内核 → 宿主** | **MCP** | 内核（客户端） |
+| **B** | 本程序驱动内核（会话/配置） | **宿主 → 内核** | **HTTP + SSE** | 宿主（客户端） |
+| C | 外部 agent 调用本程序 | 外部 → 宿主 | MCP | 外部 agent（**维持 v1.x 不变**） |
+| D | 本程序托管内核进程 | — | 进程管理 | 宿主 |
+
+> 关键事实：opencode 只做 MCP **客户端**，从不做服务端。所以
+> 「本程序是 opencode 的 MCP 服务」就是方向 A，也是本次嵌入的核心价值 ——
+> 内核因此拿到本程序 **21 个组学领域工具**（`design_*` / `manuscript_*` /
+> `project_*` / `stat_*` / `export_*`）。
+
+**新增 `kernel` 子命令组** —— session / skill / API Key 都能在控制台配置，
+且**写的是 opencode 自己的文件**，不存在第二套真值：
+
+```bat
+PCLRadiomics.exe kernel selftest                  :: 离线自检（建议先跑）
+PCLRadiomics.exe kernel status                    :: 二进制/进程/配置/凭据/技能总览
+PCLRadiomics.exe kernel auth import-host          :: 复用宿主凭据链的密钥（写 auth.json，0600）
+PCLRadiomics.exe kernel auth set deepseek sk-xxx  :: 手填 API Key
+PCLRadiomics.exe kernel skill add my-skill --file SKILL.md   :: 写 opencode 的 SKILL.md
+PCLRadiomics.exe kernel session list|new|prompt   :: 会话（走内核官方 HTTP API）
+PCLRadiomics.exe kernel model list|set            :: 模型（以 opencode models 为准）
+PCLRadiomics.exe kernel mcp host                  :: 起宿主 MCP 端点并注册给内核
+PCLRadiomics.exe kernel ui                        :: 独立控制台窗口里开内核 TUI
+```
+
+**配置与 opencode 完全一致**（这是"保持一致"的实现方式）：
+
+| 配置域 | 落点 |
+|---|---|
+| session | 内核官方 HTTP API（无本地副本） |
+| skill | `<程序目录>/opencode/config/opencode/skill/<name>/SKILL.md` |
+| API Key | `<程序目录>/opencode/data/opencode/auth.json`（0600） |
+| model | `opencode.json` 顶层 `model` |
+| MCP | `opencode.json` 的 **`mcp`** 段（不是 `mcpServers`），超时显式设 **600000 ms** |
+
+**隔离运行**：内核状态全部落在 `<程序目录>/opencode/`，实测用户真实的
+`~/.local/share/opencode` 未被触碰。
+
+**实测数据**：内核二进制 **172.3 MB**；冷启动到 health **0.94 s**；
+内核 18 个内置工具 + 本程序 21 个领域工具；产物体积约 **367 MB**。
+
+**双 Windows 变体**（`编译_内核版.bat`）：
+`PCLRadiomics.exe`（windowed，双击无黑框）与
+`PCLRadiomicsConsole.exe`（console 子系统）。分两个变体是因为 Win11 的控制台
+由 Windows Terminal 托管（属于别的进程），`ShowWindow` 藏不掉。
+
+**分发注意**：内核二进制 172.3 MB，超过 GitHub 单文件 100 MB 硬上限，**故不入库**；
+构建时由 `pclradiomics.spec` 自动获取（离线可先跑
+`build_opencode_kernel.bat --from-source` 从源码构建）。`.gitignore` 已排除
+`opencode/`（该目录含真实 API Key 与会话数据）。单文件版按设计不含内核。
+
+> 详见 [`RELEASE_v2.0.0.md`](RELEASE_v2.0.0.md)。
 
 ### v1.3.0 · 手稿缺陷审阅工作台（汇总发布）
 

@@ -19,6 +19,7 @@
 """
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -40,22 +41,38 @@ datas += collect_data_files("mcp")
 datas += collect_data_files("docx")   # python-docx 的默认模板 templates/default.docx 必须一起打包，否则导出 Word 会失败
 
 # —— 内嵌 opencode 内核二进制（172 MB）——
-# 为何不入库：GitHub 单文件硬上限 100 MB。故由 build_opencode_kernel.bat / CI 步骤
-# 下载 release zip 解压到 opencode/，打包时再打进去。
+# 为何不入库：GitHub 单文件硬上限 100 MB。故由构建期获取；本 spec 自带获取逻辑，
+# 因此**不需要 workflow 做任何额外步骤**（这让构建在任何环境都自洽）。
 # 放在 datas 的 "opencode" 目标下 → 冻结后落在 _internal/opencode/opencode.exe，
 # 由 kernel_client.opencode_exe() 经 resource_path 找到（不放进 binaries：
 # 那是预编译依赖目录，会被依赖分析/strip 处理，而这是个自带运行时的独立 exe）。
-SKIP_KERNEL = os.environ.get("PCL_SKIP_KERNEL", "") not in ("", "0", "false", "False")
 KERNEL_EXE = os.path.join(ROOT, "opencode", "opencode.exe")
+SKIP_KERNEL = os.environ.get("PCL_SKIP_KERNEL", "") not in ("", "0", "false", "False")
+FORCE_KERNEL_ONEFILE = os.environ.get("PCL_ONEFILE_WITH_KERNEL", "") not in ("", "0", "false", "False")
+# onefile 默认**不**打包内核：onefile 每次启动都要把内容解包到 %TEMP%，再塞一个
+# 172 MB 的内核会让启动严重恶化；而 MCP 客户端会反复拉起进程 → 反复解包。
+# 要强制包含：PCL_ONEFILE_WITH_KERNEL=1（决策 D5 的连带结论，见 plan §4.3）。
+if ONEFILE and not FORCE_KERNEL_ONEFILE:
+    SKIP_KERNEL = True
+
+if not os.path.exists(KERNEL_EXE) and not SKIP_KERNEL:
+    import subprocess as _subprocess
+    print("[spec] 未找到内嵌内核 opencode\\opencode.exe，尝试获取…")
+    _rc = _subprocess.call([sys.executable, os.path.join(ROOT, "get_opencode_kernel.py")])
+    if _rc != 0:
+        raise SystemExit(
+            "[打包中止] 未能获取内嵌内核 opencode\\opencode.exe。\n"
+            "  · 有网时本 spec 会自动下载；离线请手工把 v1.18.35 的\n"
+            "    opencode-windows-x64.zip 解压到 opencode/ 目录；\n"
+            "  · 或先跑 build_opencode_kernel.bat --from-source 从源码构建；\n"
+            "  · 若确实要打一个不含内核的版本，设 PCL_SKIP_KERNEL=1。"
+        )
+
 if os.path.exists(KERNEL_EXE):
     datas.append((KERNEL_EXE, "opencode"))
-elif not SKIP_KERNEL:
-    raise SystemExit(
-        "[打包中止] 未找到内嵌内核 opencode\\opencode.exe。\n"
-        "  · CI/本地请先运行 build_opencode_kernel.bat，或手动把 v1.18.35 的\n"
-        "    opencode-windows-x64.zip 解压到 opencode/ 目录；\n"
-        "  · 若确实要打一个不含内核的版本，设 PCL_SKIP_KERNEL=1。"
-    )
+    print("[spec] 已纳入内嵌内核: {0:.1f} MB".format(os.path.getsize(KERNEL_EXE) / 1024 / 1024))
+elif SKIP_KERNEL:
+    print("[spec] 按配置跳过内嵌内核（PCL_SKIP_KERNEL=1 或 onefile 默认）")
 
 HIDDEN = ["app_paths", "stages_data", "llm_client", "design_agent",
           "mcp_server", "api_server", "cli", "ui_kit", "design_studio", "omics_pipeline",
